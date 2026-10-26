@@ -30,9 +30,17 @@ jobs:
         run: Remove-Item 'C:\Program Files\Git\usr\bin\link.exe' -Force -ErrorAction SilentlyContinue
       - run: cargo test -p aionui-session --lib service_tier --locked
       - run: cargo test -p aionui-ai-agent --lib service_tier --locked
-      - run: cargo build --release -p aionui-app --locked
+      - name: Build release runtime
+        shell: bash
         env:
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            cargo build --release --target x86_64-pc-windows-msvc -p aionui-app --locked
+            cp target/x86_64-pc-windows-msvc/release/aioncore.exe target/release/aioncore.exe
+          else
+            cargo build --release -p aionui-app --locked
+          fi
       - name: Verify Windows runtime has no VC redistributable dependency
         if: runner.os == 'Windows'
         run: python scripts/check-windows-runtime-imports.py target/release/aioncore.exe
