@@ -136,6 +136,7 @@ struct SessionRuntime {
 /// backend-Arc-free event pump can apply the same fallback REST applies.
 #[derive(Debug, Clone, Default)]
 struct CapsFallback {
+    service_tier: Option<aionui_session::ServiceTierSnapshot>,
     mode: Option<String>,
     model: Option<String>,
     effort: Option<String>,
@@ -978,6 +979,7 @@ impl SessionAgentTask {
             mode: current_mode.clone(),
             model: current_model.clone(),
             effort: self.backend.capabilities().current_effort,
+            service_tier: self.backend.capabilities().service_tier,
         });
         // Same reason, for the catalog itself: a later confirmation has to re-project the
         // WHOLE snapshot, and the pump can only do that from a catalog it was handed.
@@ -1057,6 +1059,9 @@ impl SessionAgentTask {
                     })
                     .collect(),
             });
+        }
+        if let Some(snapshot) = self.backend.capabilities().service_tier {
+            config_options.push(service_tier_config_option(&snapshot));
         }
         Ok(aionui_api_types::GetConfigOptionsResponse { config_options })
     }
@@ -1140,6 +1145,10 @@ impl SessionAgentTask {
         // observed re-read — the frontend's `hasObservedValue` requires Observed AND the
         // option's current_value == requested, same as mode/model.
         match option_id {
+            "service_tier" => {
+                // Backend dispatch returns only after a matching settings notification.
+                self.persist_config_selection("service_tier", value).await;
+            }
             // Adopt the value as the picker highlight ONLY when it is really in force.
             // Writing the override for a deferred switch is exactly what made the old
             // response self-fulfilling — it read straight back and reported Observed
@@ -1162,7 +1171,7 @@ impl SessionAgentTask {
                 // the ONLY place the choice is durably recorded. Backend already accepted
                 // + validated it (dispatch above); best-effort persist (a DB failure must
                 // not fail the switch the CLI already applied).
-                self.persist_effort(value).await;
+                self.persist_config_selection(EFFORT_CONFIG_KEY, value).await;
             }
             _ => {
                 return Ok(aionui_api_types::SetConfigOptionResponse {
@@ -1209,7 +1218,7 @@ impl SessionAgentTask {
     /// future config key is preserved. Best-effort: a repo miss/failure is logged, not
     /// propagated — the backend already applied the effort, and losing only the
     /// persistence (not the live switch) is the safe degradation. No-op without a repo.
-    async fn persist_effort(&self, value: &str) {
+    async fn persist_config_selection(&self, key: &str, value: &str) {
         let Some(repo) = self.session_repo.as_ref() else {
             return;
         };
@@ -1229,7 +1238,7 @@ impl SessionAgentTask {
                 return;
             }
         };
-        selections.insert(EFFORT_CONFIG_KEY.to_owned(), value.to_owned());
+        selections.insert(key.to_owned(), value.to_owned());
         let json = match serde_json::to_string(&selections) {
             Ok(j) => j,
             Err(err) => {
@@ -2053,6 +2062,14 @@ pub async fn build_session_instance(
     // carried from the new-conversation screen all along and nothing ever read
     // it, so an effort chosen before the first turn was dropped.
     let persisted_effort = resolved_effort(config, session_snapshot);
+    let persisted_service_tier = session_snapshot
+        .and_then(|s| {
+            s.config_selections
+                .iter()
+                .find(|(key, _)| key.as_str() == "service_tier")
+        })
+        .map(|(_, value)| value.as_str().to_owned())
+        .or_else(|| config.pending_config_options.get("service_tier").cloned());
 
     // DEV (`--dump-prompts`): dump the resolved SessionConfig BEFORE it moves
     // into open_session. Best-effort — a failure only warns, never fails open.
@@ -2126,6 +2143,16 @@ pub async fn build_session_instance(
         }
     }
 
+    if let Some(value) = persisted_service_tier.as_ref() {
+        backend
+            .dispatch(Command::SetConfigOption {
+                option_id: "service_tier".into(),
+                value: value.clone(),
+            })
+            .await
+            .map_err(|error| AgentError::bad_request(format!("Service tier was not applied: {error}")))?;
+    }
+
     // GAP #7 (G5): project the backend's discovered catalog back into agent_metadata
     // so the cold-start picker stays fresh. Best-effort, detached, off the open path.
     if let Some((agent_id, catalog_tx)) = catalog_writeback {
@@ -2152,6 +2179,9 @@ pub async fn build_session_instance(
         // already stopped listening — the claude case (usage rides `result`).
         Some(broadcaster),
     );
+    if let Some(value) = persisted_service_tier {
+        task.persist_config_selection("service_tier", &value).await;
+    }
     Ok(Some(crate::agent_task::AgentInstance::Session(task)))
 }
 
@@ -2440,6 +2470,12 @@ fn catalog_partial_from_caps(caps: &aionui_session::Capabilities) -> Option<aion
             })).collect::<Vec<_>>(),
         }));
     }
+    if let Some(snapshot) = caps.service_tier.as_ref() {
+        let mut option = service_tier_config_option(snapshot);
+        // A shared agent catalog must never copy another conversation's selection.
+        option.current_value = None;
+        config_options.push(serde_json::to_value(option).expect("service tier option serializes"));
+    }
     let available_commands = if caps.slash_commands.is_empty() {
         None
     } else {
@@ -2605,6 +2641,28 @@ fn session_event_name(e: &SessionEvent) -> &'static str {
 ///
 /// Two callers, deliberately sharing one projection: the catalog arrival itself, and a
 /// later `ConfigChanged` confirming an agent-applied mode/model.
+fn service_tier_config_option(snapshot: &aionui_session::ServiceTierSnapshot) -> aionui_api_types::AcpConfigOptionDto {
+    aionui_api_types::AcpConfigOptionDto {
+        id: "service_tier".into(),
+        name: Some("Speed".into()),
+        label: None,
+        description: None,
+        category: Some("speed".into()),
+        option_type: "select".into(),
+        current_value: snapshot.current_value.clone(),
+        options: snapshot
+            .options
+            .iter()
+            .map(|option| aionui_api_types::AcpConfigSelectOptionDto {
+                value: option.value.clone(),
+                name: Some(option.name.clone()),
+                label: None,
+                description: option.description.clone(),
+            })
+            .collect(),
+    }
+}
+
 fn emit_config_options_snapshot(modes: &[ModeInfo], models: &[ModelInfo], runtime: &SessionRuntime) {
     // Same fallback order REST uses (`override → backend-reported`). Without the second
     // half, every axis the user never picked would go out as `None` and blank that picker,
@@ -2677,6 +2735,9 @@ fn emit_config_options_snapshot(modes: &[ModeInfo], models: &[ModelInfo], runtim
                 })
                 .collect(),
         });
+    }
+    if let Some(snapshot) = fallback.service_tier.as_ref() {
+        config_options.push(service_tier_config_option(snapshot));
     }
     // No categories → nothing to re-project; a spurious empty-snapshot frame would only
     // clobber the frontend's picker.
@@ -2946,6 +3007,18 @@ fn spawn_event_pump(
             // here, not in the stateless `translate_event`, because the current-value
             // highlight needs the runtime's optimistic overrides. Emitted whole (model +
             // mode categories together) so it never wipes a sibling category.
+            if let SessionEvent::AdapterSpecific { tag, payload } = &env.event
+                && tag == "service_tier"
+                && let Ok(snapshot) = serde_json::from_value::<aionui_session::ServiceTierSnapshot>(payload.clone())
+            {
+                if let Ok(mut fallback) = runtime.caps_fallback.lock() {
+                    fallback.service_tier = Some(snapshot);
+                }
+                if let Some((modes, models)) = runtime.last_catalog() {
+                    emit_config_options_snapshot(&modes, &models, &runtime);
+                }
+                continue;
+            }
             if let SessionEvent::CatalogUpdated {
                 models,
                 modes,

@@ -86,6 +86,8 @@ pub struct AcpBuildExtra {
     #[serde(default)]
     pub thought_level: Option<String>,
     #[serde(default)]
+    pub pending_config_options: std::collections::HashMap<String, String>,
+    #[serde(default)]
     pub cron_job_id: Option<String>,
     #[serde(default)]
     pub team_mcp_stdio_config: Option<TeamMcpStdioConfig>,

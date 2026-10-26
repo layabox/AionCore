@@ -66,7 +66,8 @@ pub use backend::{
 };
 pub use capability::{
     BlockSet, Capabilities, CapabilityTier, CommandSet, ModeInfo, ModeSwitchEffect, ModelInfo, PromptAcceptedSource,
-    SignalSet, SlashCommandInfo, backend_supports_midturn_delivery, block_kind_name,
+    ServiceTierOption, ServiceTierSnapshot, SignalSet, SlashCommandInfo, backend_supports_midturn_delivery,
+    block_kind_name,
 };
 pub use error::SessionError;
 pub use event::UsageBreakdown;

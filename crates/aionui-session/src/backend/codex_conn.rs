@@ -721,6 +721,7 @@ pub fn codex_capabilities() -> Capabilities {
         current_model: None,
         current_mode: None,
         current_effort: None,
+        service_tier: None,
         auth_methods: vec!["chatgptAuthTokens".into(), "refresh".into()],
         // B5 (mid-turn interjection Task 4): the conversation layer now routes a
         // mid-turn send to Command::Steer (turn/steer soft injection), so a
@@ -963,6 +964,7 @@ enum DiscoveryKind {
 /// Per-session handshake-discovered capability lists (B-CODEX-MODEL-LIST).
 #[derive(Default, Clone)]
 struct Discovered {
+    service_tier: super::codex_service_tier::State,
     models: Vec<crate::capability::ModelInfo>,
     /// For codex this holds the fixed permission-tier mode enum mapped from
     /// `permissionProfile/list` (feature 012), NOT collaborationMode.
@@ -1724,6 +1726,25 @@ async fn reader_task(
                         // server notification → SessionEvent(s)
                         let cur = turn_gen.load(Ordering::SeqCst);
                         let params = frame.get("params").unwrap_or(&Value::Null);
+                        if m == "thread/settings/updated" {
+                            let snapshot = {
+                                let mut disc = discovered.lock().unwrap_or_else(|e| e.into_inner());
+                                disc.service_tier
+                                    .observe(params.get("threadSettings").unwrap_or(&Value::Null));
+                                disc.service_tier.snapshot()
+                            };
+                            if let Some(snapshot) = snapshot {
+                                emit(
+                                    &event_tx,
+                                    &session_id,
+                                    cur,
+                                    SessionEvent::AdapterSpecific {
+                                        tag: "service_tier".into(),
+                                        payload: serde_json::to_value(snapshot).unwrap_or(Value::Null),
+                                    },
+                                );
+                            }
+                        }
                         if m == "thread/started" {
                             // bind threadId (backend transport key, kept private).
                             if let Some(tid) = params.get("thread").and_then(|t| t.get("id")).and_then(Value::as_str) {
@@ -1890,6 +1911,13 @@ async fn reader_task(
                         // ERROR terminates the turn / surfaces a Notice (below) —
                         // never a silent drop. Other responses (settings/rollback/etc)
                         // flow via notifications; diagnostic only.
+                        if let Some(result) = frame.get("result").filter(|r| r.get("thread").is_some()) {
+                            discovered
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .service_tier
+                                .observe(result);
+                        }
                         if let Some(rid) = frame.get("id").and_then(Value::as_u64) {
                             let error_message = frame.get("error").map(|e| {
                                 e.get("message")
@@ -2402,6 +2430,11 @@ fn fill_discovery(kind: DiscoveryKind, result: &Value, discovered: &Arc<std::syn
     };
     match kind {
         DiscoveryKind::Models => {
+            discovered
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .service_tier
+                .discover(result);
             let arr = list("data", "models");
             let present = arr.is_some();
             let models = arr
@@ -4515,6 +4548,68 @@ impl SessionBackend for CodexSessionBackend {
                     turn_gen: self.turn_gen.load(Ordering::SeqCst),
                 })
             }
+            Command::SetConfigOption { option_id, value } if option_id == "service_tier" => {
+                self.suspend
+                    .ensure_awake(aionui_common::now_ms(), || self.wake_handle())
+                    .await?;
+                let tid = self.bound_thread().await?;
+                // Wait for the real model catalog. No fabricated tier list for old CLIs.
+                for _ in 0..60 {
+                    if self.capabilities().service_tier.is_some() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                let revision = {
+                    let disc = self.discovered.lock().unwrap_or_else(|e| e.into_inner());
+                    let valid = disc
+                        .service_tier
+                        .snapshot()
+                        .is_some_and(|s| s.options.iter().any(|o| o.value == value));
+                    if !valid {
+                        return Err(BackendError::CommandNotSupported {
+                            command: "service_tier",
+                        });
+                    }
+                    disc.service_tier.revision
+                };
+                let id = self.next_rpc_id();
+                self.pending_set
+                    .lock()
+                    .await
+                    .insert(id, format!("service_tier→{value}"));
+                // Standard clears the override; Fast uses the model-advertised id.
+                let tier = if value == "standard" {
+                    Value::Null
+                } else {
+                    Value::String(value.clone())
+                };
+                self.write_frame(json!({"jsonrpc":"2.0","id":id,"method":"thread/settings/update",
+                    "params":{"threadId":tid,"serviceTier":tier}}))
+                    .await?;
+                for _ in 0..100 {
+                    let observed = {
+                        let disc = self.discovered.lock().unwrap_or_else(|e| e.into_inner());
+                        disc.service_tier.revision > revision
+                            && disc
+                                .service_tier
+                                .snapshot()
+                                .is_some_and(|s| s.current_value.as_deref() == Some(value.as_str()))
+                    };
+                    if observed {
+                        tracing::info!(service_tier = %value, "codex service tier confirmed by thread settings");
+                        return Ok(CommandReceipt {
+                            accepted: true,
+                            admission: Admission::NoTurn,
+                            turn_gen: self.turn_gen.load(Ordering::SeqCst),
+                        });
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(BackendError::CommandNotSupported {
+                    command: "service_tier_not_observed",
+                })
+            }
             Command::SetConfigOption { .. } => Err(BackendError::CommandNotSupported {
                 command: "set_config_option",
             }),
@@ -4578,6 +4673,7 @@ impl SessionBackend for CodexSessionBackend {
         if !disc.modes.is_empty() {
             caps.available_modes = disc.modes.clone();
         }
+        caps.service_tier = disc.service_tier.snapshot();
         caps
     }
 
@@ -7427,6 +7523,68 @@ mod tests {
             assert!(
                 written.contains(r#""threadId":"th-7""#),
                 "id `{option_id}` carries threadId, got: {written}"
+            );
+        }
+    }
+
+    /// Replay the observed 0.161.0 settings notification, gated until after the write.
+    #[tokio::test]
+    async fn service_tier_waits_for_observation_and_standard_clears_override() {
+        for (value, echoed) in [("priority", "priority"), ("standard", "default")] {
+            let notification = json!({"jsonrpc":"2.0","method":"thread/settings/updated",
+                "params":{"threadId":"th-speed","threadSettings":{"model":"speed-model","serviceTier":echoed}}});
+            let fake = fake_with_binding("th-speed", None).with_gated_tail(format!("{notification}\n").into_bytes());
+            let captured = fake.captured_stdin();
+            let release = fake.stdout_releaser();
+            let backend = Arc::new(CodexSessionBackend::build_with_io("speed", Box::new(fake)).await);
+            backend
+                .discovered
+                .lock()
+                .unwrap()
+                .service_tier
+                .discover(&json!({"data":[{
+                    "id":"speed-model","isDefault":true,
+                    "serviceTiers":[{"id":"priority","name":"Fast","description":"Higher usage"}]
+                }]}));
+            let _events = backend.events();
+            let task = {
+                let backend = backend.clone();
+                tokio::spawn(async move {
+                    backend
+                        .dispatch(Command::SetConfigOption {
+                            option_id: "service_tier".into(),
+                            value: value.into(),
+                        })
+                        .await
+                })
+            };
+            for _ in 0..40 {
+                if captured_str(&captured).await.contains("serviceTier") {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(
+                !task.is_finished(),
+                "a command acknowledgement cannot confirm a service tier"
+            );
+            let frame: Value = captured_str(&captured)
+                .await
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .find(|frame| frame["method"] == "thread/settings/update")
+                .unwrap();
+            assert_eq!(
+                frame["params"]["serviceTier"],
+                if value == "standard" { Value::Null } else { json!(value) }
+            );
+            release();
+            task.await
+                .unwrap()
+                .expect("matching settings notification confirms the switch");
+            assert_eq!(
+                backend.capabilities().service_tier.unwrap().current_value.as_deref(),
+                Some(value)
             );
         }
     }
