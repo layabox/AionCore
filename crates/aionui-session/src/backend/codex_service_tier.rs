@@ -14,6 +14,12 @@ pub(super) struct State {
 }
 
 impl State {
+    pub fn begin_handshake(&mut self) {
+        self.current_value = None;
+        self.current_model = None;
+        self.revision += 1;
+    }
+
     pub fn discover(&mut self, result: &Value) {
         self.models.clear();
         for model in result.get("data").and_then(Value::as_array).into_iter().flatten() {
@@ -70,6 +76,7 @@ impl State {
         }];
         options.extend(tiers.clone());
         Some(ServiceTierSnapshot {
+            model_id: model.clone(),
             current_value: self.current_value.clone(),
             options,
         })
@@ -94,5 +101,11 @@ mod tests {
         assert_eq!(state.snapshot().unwrap().current_value.as_deref(), Some("standard"));
         state.observe(&serde_json::json!({"model":"ordinary-model"}));
         assert_eq!(state.snapshot().unwrap().options.len(), 1);
+        state.begin_handshake();
+        assert_eq!(
+            state.snapshot().unwrap().current_value,
+            None,
+            "wake must not confirm a stale observation"
+        );
     }
 }

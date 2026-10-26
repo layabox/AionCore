@@ -33,3 +33,13 @@ cargo build --release -p aionui-app --locked
 
 The session tests replay the observed wire notification and verify Fast's actual
 wire id, Standard's null reset, waiting for observation, and model-specific lists.
+
+Additional verification: a real ACPCore HTTP conversation was created with a
+specific model and initial Fast selection. Standard/Fast switching confirmed
+observed values, and after one minimal inference turn a backend restart restored
+the last confirmed Standard selection ahead of the original Fast seed.
+
+Startup waits for the requested model's observation before selecting speed.
+An already observed target value is idempotent (no second write/notification is
+required). Starting or waking a connection clears stale service-tier observations;
+resume must finish before a speed write can trust its pre-seeded thread id.

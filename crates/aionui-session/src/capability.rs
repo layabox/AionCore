@@ -310,6 +310,7 @@ mod tests {
 /// Speed configuration projected from Codex model/list and thread settings.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ServiceTierSnapshot {
+    pub model_id: String,
     pub current_value: Option<String>,
     pub options: Vec<ServiceTierOption>,
 }

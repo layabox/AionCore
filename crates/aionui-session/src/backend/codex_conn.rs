@@ -1423,6 +1423,11 @@ impl CodexSessionBackend {
         // A handshake is a fresh chance: any prior resume rejection belonged to
         // the previous process/attempt.
         *self.resume_poison.lock().await = None;
+        self.discovered
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .service_tier
+            .begin_handshake();
         self.write_frame(initialize_params().into_frame(self.next_rpc_id(), "initialize"))
             .await?;
 
@@ -2157,7 +2162,7 @@ async fn reader_task(
                                 tracing::error!(
                                     conversation_id = %session_id,
                                     set = %label,
-                                    "codex thread/settings/update (SetMode/SetModel/effort) rejected by agent: {message}"
+                                    "codex thread/settings/update rejected by agent: {message}"
                                 );
                                 emit(
                                     &event_tx,
@@ -4552,6 +4557,14 @@ impl SessionBackend for CodexSessionBackend {
                 self.suspend
                     .ensure_awake(aionui_common::now_ms(), || self.wake_handle())
                     .await?;
+                // Resume pre-seeds a thread id. Wait for its result before trusting it.
+                let deadline = tokio::time::Instant::now() + super::handshake_budget();
+                while self.pending_resume.lock().await.is_some() {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(BackendError::HandshakeTimeout("Codex resume was not confirmed".into()));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
                 let tid = self.bound_thread().await?;
                 // Wait for the real model catalog. No fabricated tier list for old CLIs.
                 for _ in 0..60 {
@@ -4569,6 +4582,19 @@ impl SessionBackend for CodexSessionBackend {
                     if !valid {
                         return Err(BackendError::CommandNotSupported {
                             command: "service_tier",
+                        });
+                    }
+                    // A thread/resume response is already a real observation. Codex
+                    // need not emit a second notification for an unchanged setting.
+                    if disc
+                        .service_tier
+                        .snapshot()
+                        .is_some_and(|snapshot| snapshot.current_value.as_deref() == Some(value.as_str()))
+                    {
+                        return Ok(CommandReceipt {
+                            accepted: true,
+                            admission: Admission::NoTurn,
+                            turn_gen: self.turn_gen.load(Ordering::SeqCst),
                         });
                     }
                     disc.service_tier.revision
@@ -4591,10 +4617,10 @@ impl SessionBackend for CodexSessionBackend {
                     let observed = {
                         let disc = self.discovered.lock().unwrap_or_else(|e| e.into_inner());
                         disc.service_tier.revision > revision
-                            && disc
-                                .service_tier
-                                .snapshot()
-                                .is_some_and(|s| s.current_value.as_deref() == Some(value.as_str()))
+                            && disc.service_tier.snapshot().is_some_and(|s| {
+                                s.current_value.as_deref() == Some(value.as_str())
+                                    && s.options.iter().any(|option| option.value == value)
+                            })
                     };
                     if observed {
                         tracing::info!(service_tier = %value, "codex service tier confirmed by thread settings");
@@ -7585,6 +7611,19 @@ mod tests {
             assert_eq!(
                 backend.capabilities().service_tier.unwrap().current_value.as_deref(),
                 Some(value)
+            );
+            let before = captured_str(&captured).await;
+            backend
+                .dispatch(Command::SetConfigOption {
+                    option_id: "service_tier".into(),
+                    value: value.into(),
+                })
+                .await
+                .expect("an already observed value is idempotent");
+            assert_eq!(
+                captured_str(&captured).await,
+                before,
+                "do not wait for a redundant notification"
             );
         }
     }

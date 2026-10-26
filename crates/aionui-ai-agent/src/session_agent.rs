@@ -1593,10 +1593,6 @@ pub(crate) fn resolved_effort(
         .filter(|value| !value.is_empty())
 }
 
-/// The persisted session-cumulative cost (USD) that seeds the claude backend's
-/// cost ledger (`SessionConfig.initial_cost_usd`) on a rebuild. USD only:
-/// claude's own `total_cost_usd` counter is USD, and silently adding a
-/// foreign-currency figure to it would corrupt both.
 fn resolved_service_tier(config: &AcpBuildExtra, session_snapshot: Option<&PersistedSessionState>) -> Option<String> {
     session_snapshot
         .and_then(|s| {
@@ -1608,6 +1604,10 @@ fn resolved_service_tier(config: &AcpBuildExtra, session_snapshot: Option<&Persi
         .or_else(|| config.pending_config_options.get("service_tier").cloned())
 }
 
+/// The persisted session-cumulative cost (USD) that seeds the claude backend's
+/// cost ledger (`SessionConfig.initial_cost_usd`) on a rebuild. USD only:
+/// claude's own `total_cost_usd` counter is USD, and silently adding a
+/// foreign-currency figure to it would corrupt both.
 pub(crate) fn initial_cost_usd_from_snapshot(session_snapshot: Option<&PersistedSessionState>) -> Option<f64> {
     let cost = session_snapshot?.context_usage.as_ref()?.cost.as_ref()?;
     (cost.currency.eq_ignore_ascii_case("usd") && cost.amount > 0.0).then_some(cost.amount)
@@ -2113,6 +2113,7 @@ pub async fn build_session_instance(
         }
     }
 
+    let expected_speed_model = session_config.model.clone();
     let backend = connection
         .open_session(spec, session_config)
         .await
@@ -2148,6 +2149,28 @@ pub async fn build_session_instance(
     }
 
     if let Some(value) = persisted_service_tier.as_ref() {
+        // Model reconciliation is asynchronous. Validate/apply speed only after the
+        // requested model is actually observed, so another model's tier list cannot win.
+        if let Some(model) = expected_speed_model.as_deref() {
+            let mut matched = false;
+            for _ in 0..100 {
+                if backend
+                    .capabilities()
+                    .service_tier
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.model_id == model)
+                {
+                    matched = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            if !matched {
+                return Err(AgentError::bad_request(
+                    "Service tier model was not observed before startup",
+                ));
+            }
+        }
         backend
             .dispatch(Command::SetConfigOption {
                 option_id: "service_tier".into(),
