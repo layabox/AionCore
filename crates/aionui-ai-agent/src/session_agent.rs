@@ -1597,6 +1597,17 @@ pub(crate) fn resolved_effort(
 /// cost ledger (`SessionConfig.initial_cost_usd`) on a rebuild. USD only:
 /// claude's own `total_cost_usd` counter is USD, and silently adding a
 /// foreign-currency figure to it would corrupt both.
+fn resolved_service_tier(config: &AcpBuildExtra, session_snapshot: Option<&PersistedSessionState>) -> Option<String> {
+    session_snapshot
+        .and_then(|s| {
+            s.config_selections
+                .iter()
+                .find(|(key, _)| key.as_str() == "service_tier")
+        })
+        .map(|(_, value)| value.as_str().to_owned())
+        .or_else(|| config.pending_config_options.get("service_tier").cloned())
+}
+
 pub(crate) fn initial_cost_usd_from_snapshot(session_snapshot: Option<&PersistedSessionState>) -> Option<f64> {
     let cost = session_snapshot?.context_usage.as_ref()?.cost.as_ref()?;
     (cost.currency.eq_ignore_ascii_case("usd") && cost.amount > 0.0).then_some(cost.amount)
@@ -2062,14 +2073,7 @@ pub async fn build_session_instance(
     // carried from the new-conversation screen all along and nothing ever read
     // it, so an effort chosen before the first turn was dropped.
     let persisted_effort = resolved_effort(config, session_snapshot);
-    let persisted_service_tier = session_snapshot
-        .and_then(|s| {
-            s.config_selections
-                .iter()
-                .find(|(key, _)| key.as_str() == "service_tier")
-        })
-        .map(|(_, value)| value.as_str().to_owned())
-        .or_else(|| config.pending_config_options.get("service_tier").cloned());
+    let persisted_service_tier = resolved_service_tier(config, session_snapshot);
 
     // DEV (`--dump-prompts`): dump the resolved SessionConfig BEFORE it moves
     // into open_session. Best-effort — a failure only warns, never fails open.
@@ -4718,6 +4722,25 @@ mod build_mapping_tests {
             None,
             "a snapshot without a cost figure must not seed"
         );
+    }
+
+    #[test]
+    fn service_tier_restores_confirmed_selection_before_creation_seed() {
+        let mut config = AcpBuildExtra::default();
+        config
+            .pending_config_options
+            .insert("service_tier".into(), "priority".into());
+        assert_eq!(resolved_service_tier(&config, None).as_deref(), Some("priority"));
+        let mut snapshot = PersistedSessionState::default();
+        snapshot.config_selections.insert(
+            crate::shared_kernel::ConfigKey::new("service_tier"),
+            crate::shared_kernel::ConfigValue::new("standard"),
+        );
+        assert_eq!(
+            resolved_service_tier(&config, Some(&snapshot)).as_deref(),
+            Some("standard")
+        );
+        assert_eq!(resolved_service_tier(&AcpBuildExtra::default(), None), None);
     }
 
     #[test]
