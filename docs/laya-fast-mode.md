@@ -47,3 +47,17 @@ resume must finish before a speed write can trust its pre-seeded thread id.
 Windows release builds retain the upstream `-C target-feature=+crt-static`
 packaging policy. CI inspects PE imports to reject a VC redistributable dependency
 and executes the finished binary's `--version` before upload.
+
+Review fixes:
+- Re-emit the speed snapshot when model/permission discovery completes, including
+  when the thread settings arrived before the model catalog. No extra REST read
+  is needed to populate speed choices.
+- Persist valid observed speed values from the event pump, so a model-driven
+  reset replaces the previous saved Fast value. Task and pump writes share a
+  per-session lock and preserve unrelated configuration selections.
+- Reconcile an obsolete saved tier against the resumed model's advertised
+  choices. Preserve an observed supported value, otherwise select Standard when
+  available; a CLI without speed support does not make an existing session
+  impossible to resume. An explicit initial request remains strict.
+- Log obsolete-selection reconciliation at info and missing restore-model
+  observations at warn; prompts and provider payloads are not logged.

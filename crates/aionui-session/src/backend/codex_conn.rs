@@ -2107,6 +2107,24 @@ async fn reader_task(
                                                 slash_commands: builtin_slash_commands(),
                                             },
                                         );
+                                        // Settings can precede model/list. Re-project speed
+                                        // after discovery even if no later settings notice arrives.
+                                        let speed = discovered
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner())
+                                            .service_tier
+                                            .snapshot();
+                                        if let Some(snapshot) = speed {
+                                            emit(
+                                                &event_tx,
+                                                &session_id,
+                                                turn_gen.load(Ordering::SeqCst),
+                                                SessionEvent::AdapterSpecific {
+                                                    tag: "service_tier".into(),
+                                                    payload: serde_json::to_value(snapshot).unwrap_or(Value::Null),
+                                                },
+                                            );
+                                        }
                                     }
                                     DiscoveryKind::Checkpoints => {
                                         emit(
@@ -7551,6 +7569,73 @@ mod tests {
                 "id `{option_id}` carries threadId, got: {written}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn service_tier_discovery_pushes_both_notification_orders() {
+        for settings_first in [true, false] {
+            let settings = json!({"jsonrpc":"2.0","method":"thread/settings/updated",
+                "params":{"threadId":"th-speed","threadSettings":{"model":"speed-model","serviceTier":"priority"}}});
+            let models = json!({"jsonrpc":"2.0","id":50,"result":{"data":[{
+                "id":"speed-model","isDefault":true,"serviceTiers":[{"id":"priority","name":"Fast"}]
+            }]}});
+            let tail = if settings_first {
+                format!("{settings}\n{models}\n")
+            } else {
+                format!("{models}\n{settings}\n")
+            };
+            let fake = fake_with_binding("th-speed", None).with_gated_tail(tail.into_bytes());
+            let release = fake.stdout_releaser();
+            let backend = CodexSessionBackend::build_with_io("speed", Box::new(fake)).await;
+            backend.register_model_discovery_for_test(50).await;
+            let mut events = backend.events();
+            release();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while let Some(event) = events.next().await {
+                    if let SessionEvent::AdapterSpecific { tag, payload } = event.event
+                        && tag == "service_tier"
+                        && payload["current_value"] == "priority"
+                    {
+                        assert_eq!(payload["model_id"], "speed-model");
+                        assert_eq!(payload["options"][1]["value"], "priority");
+                        return;
+                    }
+                }
+                panic!("speed snapshot never emitted; settings_first={settings_first}");
+            })
+            .await
+            .expect("speed must be pushed without a REST refresh");
+        }
+    }
+
+    #[tokio::test]
+    async fn service_tier_rejects_unsupported_explicit_request_without_writing() {
+        let fake = fake_with_binding("th-speed", None);
+        let captured = fake.captured_stdin();
+        let backend = CodexSessionBackend::build_with_io("speed", Box::new(fake)).await;
+        backend
+            .discovered
+            .lock()
+            .unwrap()
+            .service_tier
+            .discover(&json!({"data":[{
+                "id":"standard-only","isDefault":true,"serviceTiers":[]
+            }]}));
+        let _events = backend.events();
+        let error = backend
+            .dispatch(Command::SetConfigOption {
+                option_id: "service_tier".into(),
+                value: "priority".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            BackendError::CommandNotSupported {
+                command: "service_tier"
+            }
+        ));
+        assert!(!captured_str(&captured).await.contains("serviceTier"));
     }
 
     /// Replay the observed 0.161.0 settings notification, gated until after the write.

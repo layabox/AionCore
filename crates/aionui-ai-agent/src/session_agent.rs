@@ -130,6 +130,7 @@ struct SessionRuntime {
     /// place holding both the backend handle and the same fallback order.
     /// Order is `override → this`, identical to REST.
     caps_fallback: std::sync::Mutex<CapsFallback>,
+    selection_persist_lock: tokio::sync::Mutex<()>,
 }
 
 /// Backend-reported current values, mirrored out of `capabilities()` so the
@@ -495,6 +496,7 @@ impl SessionAgentTask {
             effort_override: std::sync::Mutex::new(None),
             last_catalog: std::sync::Mutex::new(None),
             caps_fallback: std::sync::Mutex::new(CapsFallback::default()),
+            selection_persist_lock: tokio::sync::Mutex::new(()),
         });
         // Subscribe to the backend's event stream HERE (sync), then hand ONLY the
         // stream to the pump — never a backend Arc (see `spawn_event_pump` for why
@@ -1212,8 +1214,8 @@ impl SessionAgentTask {
         })
     }
 
-    /// Persist the chosen effort level into `acp_session.config_selections` (under
-    /// [`EFFORT_CONFIG_KEY`]) so it survives a respawn/resume. Reads the existing
+    /// Persist an observed configuration selection so it survives respawn/resume.
+    /// Reads the existing
     /// selections first and MERGES (rather than overwriting the whole map) so any other
     /// future config key is preserved. Best-effort: a repo miss/failure is logged, not
     /// propagated — the backend already applied the effort, and losing only the
@@ -1222,40 +1224,8 @@ impl SessionAgentTask {
         let Some(repo) = self.session_repo.as_ref() else {
             return;
         };
-        // Merge into the existing selection map (preserve unrelated keys).
-        let mut selections: std::collections::HashMap<String, String> = match repo
-            .load_runtime_state_for_user(&self.user_id, &self.conversation_id)
-            .await
-        {
-            Ok(Some(state)) => state
-                .config_selections_json
-                .as_deref()
-                .and_then(|raw| serde_json::from_str(raw).ok())
-                .unwrap_or_default(),
-            Ok(None) => std::collections::HashMap::new(),
-            Err(err) => {
-                tracing::warn!(conversation_id = %self.conversation_id, error = %err, "persist_effort: load_runtime_state failed; skipping effort persist");
-                return;
-            }
-        };
-        selections.insert(key.to_owned(), value.to_owned());
-        let json = match serde_json::to_string(&selections) {
-            Ok(j) => j,
-            Err(err) => {
-                tracing::warn!(conversation_id = %self.conversation_id, error = %err, "persist_effort: encode config_selections failed");
-                return;
-            }
-        };
-        let params = SaveRuntimeStateParams {
-            config_selections_json: Some(Some(&json)),
-            ..Default::default()
-        };
-        if let Err(err) = repo
-            .save_runtime_state_for_user(&self.user_id, &self.conversation_id, &params)
-            .await
-        {
-            tracing::warn!(conversation_id = %self.conversation_id, error = %err, "persist_effort: save_runtime_state failed");
-        }
+        let _guard = self.runtime.selection_persist_lock.lock().await;
+        persist_config_selection(repo.as_ref(), &self.user_id, &self.conversation_id, key, value).await;
     }
 
     /// Session usage snapshot, served from the persisted `context_usage` runtime
@@ -1591,6 +1561,22 @@ pub(crate) fn resolved_effort(
         })
         .or_else(|| config.thought_level.clone())
         .filter(|value| !value.is_empty())
+}
+
+/// Preserve a supported saved choice; an obsolete saved Fast tier must not
+/// prevent resume on a model/CLI that no longer advertises that capability.
+fn restored_service_tier(value: &str, snapshot: Option<&aionui_session::ServiceTierSnapshot>) -> Option<String> {
+    let snapshot = snapshot?;
+    let supported = |value: &str| snapshot.options.iter().any(|option| option.value == value);
+    if supported(value) {
+        return Some(value.to_owned());
+    }
+    snapshot
+        .current_value
+        .as_deref()
+        .filter(|value| supported(value))
+        .map(str::to_owned)
+        .or_else(|| supported("standard").then(|| "standard".to_owned()))
 }
 
 fn resolved_service_tier(config: &AcpBuildExtra, session_snapshot: Option<&PersistedSessionState>) -> Option<String> {
@@ -2073,7 +2059,13 @@ pub async fn build_session_instance(
     // carried from the new-conversation screen all along and nothing ever read
     // it, so an effort chosen before the first turn was dropped.
     let persisted_effort = resolved_effort(config, session_snapshot);
-    let persisted_service_tier = resolved_service_tier(config, session_snapshot);
+    let mut persisted_service_tier = resolved_service_tier(config, session_snapshot);
+    let restoring_speed = session_snapshot.is_some_and(|snapshot| {
+        snapshot
+            .config_selections
+            .keys()
+            .any(|key| key.as_str() == "service_tier")
+    });
 
     // DEV (`--dump-prompts`): dump the resolved SessionConfig BEFORE it moves
     // into open_session. Best-effort — a failure only warns, never fails open.
@@ -2148,7 +2140,7 @@ pub async fn build_session_instance(
         }
     }
 
-    if let Some(value) = persisted_service_tier.as_ref() {
+    if persisted_service_tier.is_some() {
         // Model reconciliation is asynchronous. Validate/apply speed only after the
         // requested model is actually observed, so another model's tier list cannot win.
         if let Some(model) = expected_speed_model.as_deref() {
@@ -2165,19 +2157,34 @@ pub async fn build_session_instance(
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            if !matched {
+            if !matched && !restoring_speed {
                 return Err(AgentError::bad_request(
                     "Service tier model was not observed before startup",
                 ));
             }
+            if !matched {
+                tracing::warn!(conv_id = %conversation_id, "session-port: saved speed model not observed; preserving resumed settings");
+                persisted_service_tier = None;
+            }
         }
-        backend
-            .dispatch(Command::SetConfigOption {
-                option_id: "service_tier".into(),
-                value: value.clone(),
-            })
-            .await
-            .map_err(|error| AgentError::bad_request(format!("Service tier was not applied: {error}")))?;
+        if restoring_speed && let Some(value) = persisted_service_tier.as_deref() {
+            let snapshot = backend.capabilities().service_tier;
+            let restored = restored_service_tier(value, snapshot.as_ref());
+            if restored.as_deref() != Some(value) {
+                tracing::info!(conv_id = %conversation_id, saved = value, restored = ?restored,
+                    "session-port: obsolete saved speed reconciled with current model");
+            }
+            persisted_service_tier = restored;
+        }
+        if let Some(value) = persisted_service_tier.as_ref() {
+            backend
+                .dispatch(Command::SetConfigOption {
+                    option_id: "service_tier".into(),
+                    value: value.clone(),
+                })
+                .await
+                .map_err(|error| AgentError::bad_request(format!("Service tier was not applied: {error}")))?;
+        }
     }
 
     // GAP #7 (G5): project the backend's discovered catalog back into agent_metadata
@@ -3038,6 +3045,13 @@ fn spawn_event_pump(
                 && tag == "service_tier"
                 && let Ok(snapshot) = serde_json::from_value::<aionui_session::ServiceTierSnapshot>(payload.clone())
             {
+                if let Some(value) = snapshot.current_value.as_deref()
+                    && snapshot.options.iter().any(|option| option.value == value)
+                    && let Some(repo) = session_repo.as_ref()
+                {
+                    let _guard = runtime.selection_persist_lock.lock().await;
+                    persist_config_selection(repo.as_ref(), &user_id, &conversation_id, "service_tier", value).await;
+                }
                 if let Ok(mut fallback) = runtime.caps_fallback.lock() {
                     fallback.service_tier = Some(snapshot);
                 }
@@ -3571,6 +3585,50 @@ fn is_dead_resume_anchor(event: &SessionEvent) -> bool {
         message: result_text.clone(),
     };
     is_unrecoverable_resume_error(&reason)
+}
+
+/// Merge one selection while the caller holds the session persistence lock.
+async fn persist_config_selection(
+    repo: &dyn IAcpSessionRepository,
+    user_id: &str,
+    conversation_id: &str,
+    key: &str,
+    value: &str,
+) {
+    // Merge into the existing selection map (preserve unrelated keys).
+    let mut selections: std::collections::HashMap<String, String> = match repo
+        .load_runtime_state_for_user(user_id, conversation_id)
+        .await
+    {
+        Ok(Some(state)) => state
+            .config_selections_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_default(),
+        Ok(None) => std::collections::HashMap::new(),
+        Err(err) => {
+            tracing::warn!(conversation_id, error = %err, "persist_config_selection: load_runtime_state failed; skipping selection persist");
+            return;
+        }
+    };
+    selections.insert(key.to_owned(), value.to_owned());
+    let json = match serde_json::to_string(&selections) {
+        Ok(j) => j,
+        Err(err) => {
+            tracing::warn!(conversation_id, error = %err, "persist_config_selection: encode config_selections failed");
+            return;
+        }
+    };
+    let params = SaveRuntimeStateParams {
+        config_selections_json: Some(Some(&json)),
+        ..Default::default()
+    };
+    if let Err(err) = repo
+        .save_runtime_state_for_user(user_id, conversation_id, &params)
+        .await
+    {
+        tracing::warn!(conversation_id, error = %err, "persist_config_selection: save_runtime_state failed");
+    }
 }
 
 /// Persist the backend-observed session identity + config to `acp_session`, the
@@ -4744,6 +4802,43 @@ mod build_mapping_tests {
             initial_cost_usd_from_snapshot(Some(&PersistedSessionState::default())),
             None,
             "a snapshot without a cost figure must not seed"
+        );
+    }
+
+    #[test]
+    fn service_tier_restore_reconciles_obsolete_saved_fast() {
+        let standard = aionui_session::ServiceTierOption {
+            value: "standard".into(),
+            name: "Standard".into(),
+            description: None,
+        };
+        let mut snapshot = aionui_session::ServiceTierSnapshot {
+            model_id: "standard-only".into(),
+            current_value: Some("standard".into()),
+            options: vec![standard],
+        };
+        assert_eq!(
+            restored_service_tier("priority", Some(&snapshot)).as_deref(),
+            Some("standard")
+        );
+        assert_eq!(
+            restored_service_tier("standard", Some(&snapshot)).as_deref(),
+            Some("standard")
+        );
+        snapshot.current_value = None;
+        assert_eq!(
+            restored_service_tier("priority", Some(&snapshot)).as_deref(),
+            Some("standard")
+        );
+        assert_eq!(restored_service_tier("priority", None), None);
+        snapshot.options.push(aionui_session::ServiceTierOption {
+            value: "priority".into(),
+            name: "Fast".into(),
+            description: None,
+        });
+        assert_eq!(
+            restored_service_tier("priority", Some(&snapshot)).as_deref(),
+            Some("priority")
         );
     }
 
@@ -6473,8 +6568,66 @@ mod persist_tests {
         assert_eq!(state.current_model_id.as_deref(), Some("claude-opus-4-8"));
     }
 
-    // #4: a `set_config_option("effort", ...)` must persist the level into
-    // config_selections — claude emits NO ConfigChanged for effort, so unless
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn service_tier_observation_persists_model_reset() {
+        use futures_util::StreamExt;
+        let (repo, _db) = seeded_repo().await;
+        let task = SessionAgentTask::new(
+            AgentType::Acp,
+            "conv-1".into(),
+            "user-1".into(),
+            "/w".into(),
+            Arc::new(super::pump_tests::StaticCapsBackend),
+            Some(repo.clone()),
+        );
+        task.persist_config_selection("service_tier", "priority").await;
+        task.persist_config_selection(EFFORT_CONFIG_KEY, "high").await;
+        let snapshot = aionui_session::ServiceTierSnapshot {
+            model_id: "standard-only".into(),
+            current_value: Some("standard".into()),
+            options: vec![aionui_session::ServiceTierOption {
+                value: "standard".into(),
+                name: "Standard".into(),
+                description: None,
+            }],
+        };
+        let event = SessionEnvelope {
+            session_id: "conv-1".into(),
+            turn_gen: 0,
+            event: SessionEvent::AdapterSpecific {
+                tag: "service_tier".into(),
+                payload: serde_json::to_value(snapshot).unwrap(),
+            },
+        };
+        spawn_event_pump(
+            futures_util::stream::iter(vec![event]).boxed(),
+            task.runtime.clone(),
+            "conv-1".into(),
+            "user-1".into(),
+            Some(repo.clone()),
+            None,
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let state = repo
+                    .load_runtime_state_for_user("user-1", "conv-1")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let values: serde_json::Value =
+                    serde_json::from_str(state.config_selections_json.as_deref().unwrap()).unwrap();
+                if values["service_tier"] == "standard" {
+                    assert_eq!(values[EFFORT_CONFIG_KEY], "high");
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("model-reset observation must replace saved Fast");
+    }
+
+    // #4: persist effort into config_selections. Claude emits no effort echo, so unless
     // set_config_option writes it directly, effort is lost across respawn/resume.
     // This drives the real chokepoint (a task built around a NoStreamBackend + the
     // seeded repo) and asserts the level lands in the persisted config_selections.
