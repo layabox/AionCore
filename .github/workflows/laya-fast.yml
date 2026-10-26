@@ -31,6 +31,12 @@ jobs:
       - run: cargo test -p aionui-session --lib service_tier --locked
       - run: cargo test -p aionui-ai-agent --lib service_tier --locked
       - run: cargo build --release -p aionui-app --locked
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+      - name: Verify Windows runtime has no VC redistributable dependency
+        if: runner.os == 'Windows'
+        run: python scripts/check-windows-runtime-imports.py target/release/aioncore.exe
+      - run: ./target/release/${{ matrix.binary }} --version
       - uses: actions/upload-artifact@v4
         with:
           name: acp-core-${{ matrix.platform }}-${{ github.sha }}

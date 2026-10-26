@@ -43,3 +43,7 @@ Startup waits for the requested model's observation before selecting speed.
 An already observed target value is idempotent (no second write/notification is
 required). Starting or waking a connection clears stale service-tier observations;
 resume must finish before a speed write can trust its pre-seeded thread id.
+
+Windows release builds retain the upstream `-C target-feature=+crt-static`
+packaging policy. CI inspects PE imports to reject a VC redistributable dependency
+and executes the finished binary's `--version` before upload.
