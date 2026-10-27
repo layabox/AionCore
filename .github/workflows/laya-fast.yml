@@ -34,6 +34,9 @@ jobs:
       - name: Build release runtime
         shell: bash
         env:
+          # Rust 1.95's stripping can misalign Mach-O LINKEDIT on macOS 27.
+          # https://github.com/rust-lang/rust/issues/157750
+          CARGO_PROFILE_RELEASE_STRIP: 'none'
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
         run: |
           if [[ "$RUNNER_OS" == "Windows" ]]; then
