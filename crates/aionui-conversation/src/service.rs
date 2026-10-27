@@ -3501,7 +3501,7 @@ impl ConversationService {
             .find(|c| c.call_id == request_id)
             .map(|c| c.id.clone());
 
-        agent.answer_ask(request_id, answers)?;
+        agent.answer_ask(request_id, answers).await?;
 
         if let Some(conf_id) = conf_id {
             let payload = serde_json::json!({

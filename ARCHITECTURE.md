@@ -738,3 +738,35 @@ to keep ANSI codes out of captured output.
 Do NOT manually re-implement these behaviours with raw
 `tokio::process::Command` — the centralised builder is the one place to
 update policies (e.g. future `CARGO_*` cleanup, sandbox flags).
+
+## Native Codex questions
+
+Verified protocol evidence: `docs/protocol-schemas/codex-0.161.0/`, including
+actual two-question request/answer frames captured from codex-cli 0.161.0.
+The Codex backend maps `item/tool/requestUserInput` to the existing session
+`Ask` event, retains native question IDs privately, and maps the shared full
+answer set back to those IDs in `AnswerAsk`. Explicit decline sends the native
+response schema's empty `answers` map; it does not approve a tool or interrupt
+another task. Native numeric/string RPC IDs are preserved.
+
+Question registry state supports REST recovery, rejects duplicate answers, and
+remains retryable on write failure. Server retraction and successful flush each
+resolve the question once; terminal/EOF retires unanswered questions. The added
+`AskResolved` stream variant closes question cards across connected clients and
+requires exhaustive consumers to treat it as bookkeeping rather than a new turn.
+The dedicated HTTP answer endpoint now awaits backend dispatch, propagating
+write failures instead of acknowledging a background task early. This affects
+the ai-agent and conversation consumers of the existing answer channel; no new
+HTTP route, session FSM state or permission decision is introduced. Lifecycle
+logs include correlation IDs only, never question text or user answers.
+
+The checked-in default-mode live capture additionally verifies the CLI
+`default_mode_request_user_input` feature. Initial spawn and wake enable it
+through subprocess argv only. Nonblocking native questions survive turn
+completion and suppress idle suspension until answered/resolved; process EOF
+retires all pending native questions and releases their process-scoped IDs.
+
+Public native-question request tokens are fresh UUIDs, independent of the
+process-scoped JSON-RPC ID. A stale card can never answer a later question
+whose restarted process happens to reuse the same native ID. The private
+registry maps server resolution back to the current public token.

@@ -768,7 +768,7 @@ impl SessionAgentTask {
     /// permission confirm endpoint). `answers: None` = the user dismissed the
     /// card; the claude adapter maps that to a deny (an allow with no answers
     /// is silent data loss — claude drops unanswered questions, live 2.1.178).
-    pub fn answer_ask(
+    pub async fn answer_ask(
         &self,
         request_id: &str,
         answers: Option<Vec<aionui_api_types::AskQuestionAnswer>>,
@@ -783,31 +783,15 @@ impl SessionAgentTask {
                 })
                 .collect::<Vec<_>>()
         });
-        let backend = self.backend.clone();
-        let request_id = request_id.to_string();
-        let conv_id = self.conversation_id.clone();
-        // Same fire-and-forget shape as confirm(): the REST reply has already
-        // returned by the time the dispatch runs, so a failure here MUST be
-        // surfaced in the log or a wedged ask is undiagnosable in production.
-        tokio::spawn(async move {
-            let command = aionui_session::Command::AnswerAsk {
-                request_id: request_id.clone(),
-                answers,
-            };
-            match backend.dispatch(command).await {
-                Ok(_) => tracing::info!(
-                    conv_id = %conv_id,
-                    request_id = %request_id,
-                    "ask answer delivered to backend (dedicated channel)"
-                ),
-                Err(e) => tracing::error!(
-                    conv_id = %conv_id,
-                    request_id = %request_id,
-                    error = %e,
-                    "ask answer FAILED after REST reply already returned success — claude stays blocked on can_use_tool"
-                ),
-            }
-        });
+        let command = aionui_session::Command::AnswerAsk {
+            request_id: request_id.to_string(),
+            answers,
+        };
+        self.backend.dispatch(command).await.map_err(|error| {
+            tracing::warn!(conv_id = %self.conversation_id, %request_id, %error, "question answer was not delivered");
+            AgentError::BadGateway(error.to_string())
+        })?;
+        tracing::info!(conv_id = %self.conversation_id, %request_id, "question answer delivered to backend");
         Ok(())
     }
 
@@ -4571,10 +4555,11 @@ fn translate_event(event: SessionEvent, conversation_id: &str, terminal_result_s
                 "questions": questions,
             }))]
         }
-        // The FSM counter side is handled by the reducer; the frontend closes the
-        // card on its own answer. A cross-client "someone else answered" push is a
-        // follow-up (the recovery REST path re-lists open asks on reload).
-        SessionEvent::AskResolved { .. } => Vec::new(),
+        // Resolve the card on every client, including server retraction and answers
+        // delivered by another window; never leave a stale actionable question.
+        SessionEvent::AskResolved { request_id } => vec![AgentStreamEvent::AskResolved(serde_json::json!({
+            "session_id": conversation_id, "request_id": request_id,
+        }))],
         // Per-turn usage/cost → the AcpContextUsage passthrough frame the frontend
         // usage indicator reads (shape: cumulative token counters).
         SessionEvent::UsageDelta {

@@ -243,9 +243,9 @@ impl BackgroundStreamWatcher {
                 // backends that apply one only from the next turn, plus an agent's own
                 // autonomous mode change — and by then no relay exists to carry them.
                 // Dropping them left the picker showing a mode the agent was not in.
-                AgentStreamEvent::AcpConfigOption(_) | AgentStreamEvent::AcpModeInfo(_) => {
-                    self.forward_out_of_turn_frame(&ev)
-                }
+                AgentStreamEvent::AcpConfigOption(_)
+                | AgentStreamEvent::AcpModeInfo(_)
+                | AgentStreamEvent::AskResolved(_) => self.forward_out_of_turn_frame(&ev),
                 ev_ref if Self::is_orphan_turn_content(ev_ref) => {
                     // A serving turn's first frame follows its Started within
                     // seconds (spec §6.1); anything armed longer than the TTL
@@ -492,6 +492,7 @@ fn frame_kind(ev: &AgentStreamEvent) -> &'static str {
         AgentStreamEvent::Permission(_) => "permission",
         AgentStreamEvent::AcpPermission(_) => "acp_permission",
         AgentStreamEvent::Ask(_) => "ask",
+        AgentStreamEvent::AskResolved(_) => "ask_resolved",
         AgentStreamEvent::Tips(_) => "tips",
         AgentStreamEvent::Error(_) => "error",
         _ => "other",
