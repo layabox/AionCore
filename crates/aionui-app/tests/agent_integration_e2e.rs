@@ -213,37 +213,41 @@ async fn create_conversation(app: &mut axum::Router, token: &str, csrf: &str, na
     json["data"]["id"].as_str().unwrap().to_owned()
 }
 
+fn visible_agent_metadata_params<'a>(id: &'a str, agent_type: &'a str) -> UpsertAgentMetadataParams<'a> {
+    UpsertAgentMetadataParams {
+        id,
+        icon: None,
+        name: id,
+        name_i18n: None,
+        description: None,
+        description_i18n: None,
+        backend: Some(id),
+        agent_type,
+        agent_source: "internal",
+        agent_source_info: Some("{}"),
+        enabled: true,
+        command: None,
+        args: Some("[]"),
+        env: Some("[]"),
+        native_skills_dirs: None,
+        skill_delivery: None,
+        behavior_policy: Some("{}"),
+        yolo_id: Some("yolo"),
+        agent_capabilities: None,
+        auth_methods: None,
+        config_options: None,
+        available_modes: None,
+        available_models: None,
+        available_commands: None,
+        sort_order: 1,
+    }
+}
+
 async fn upsert_visible_agent_metadata(services: &aionui_app::AppServices, id: &str, agent_type: &str) {
     services
         .agent_registry
         .repo_handle()
-        .upsert(&UpsertAgentMetadataParams {
-            id,
-            icon: None,
-            name: id,
-            name_i18n: None,
-            description: None,
-            description_i18n: None,
-            backend: Some(id),
-            agent_type,
-            agent_source: "internal",
-            agent_source_info: Some("{}"),
-            enabled: true,
-            command: None,
-            args: Some("[]"),
-            env: Some("[]"),
-            native_skills_dirs: None,
-            skill_delivery: None,
-            behavior_policy: Some("{}"),
-            yolo_id: Some("yolo"),
-            agent_capabilities: None,
-            auth_methods: None,
-            config_options: None,
-            available_modes: None,
-            available_models: None,
-            available_commands: None,
-            sort_order: 1,
-        })
+        .upsert(&visible_agent_metadata_params(id, agent_type))
         .await
         .unwrap();
 }
@@ -897,17 +901,10 @@ async fn launch_arguments_reject_invalid_inputs_and_require_auth_and_csrf() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    let response = app
-        .clone()
-        .oneshot(json_with_token(
-            "PUT",
-            uri,
-            json!({"additional_args": []}),
-            &token,
-            "invalid",
-        ))
-        .await
-        .unwrap();
+    // A CSRF mismatch must keep the real cookie and change only its submitted header.
+    let mut request = json_with_token("PUT", uri, json!({"additional_args": []}), &token, &csrf);
+    request.headers_mut().insert("x-csrf-token", "invalid".parse().unwrap());
+    let response = app.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let response = app
         .clone()
@@ -927,21 +924,18 @@ async fn launch_arguments_reject_invalid_inputs_and_require_auth_and_csrf() {
 #[tokio::test]
 async fn launch_arguments_do_not_cross_custom_agent_ownership() {
     let (mut app, services, _) = build_app_with_mock_tasks().await;
-    let (admin, admin_csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
-    let response = app
-        .clone()
-        .oneshot(json_with_token(
-            "POST",
-            "/api/agents/custom",
-            json!({"name":"Owned launch args", "command":"missing-launch-fixture"}),
-            &admin,
-            &admin_csrf,
-        ))
+    let (_admin, _admin_csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
+    let owner = services.user_repo.find_by_username("admin").await.unwrap().unwrap();
+    let id = "owned-launch-arguments";
+    let mut params = visible_agent_metadata_params(id, "acp");
+    params.agent_source = "custom";
+    // Seed ownership directly: creating a real custom CLI performs an unrelated ACP probe.
+    services
+        .agent_registry
+        .repo_handle()
+        .upsert_for_user(&owner.id, &params)
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let created = body_json(response).await;
-    let id = created["data"]["id"].as_str().unwrap();
     let (other, other_csrf) = setup_and_login(&mut app, &services, "other-launch-user", "Pass123!").await;
     let response = app
         .clone()
