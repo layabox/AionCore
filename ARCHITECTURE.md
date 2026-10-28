@@ -770,3 +770,11 @@ Public native-question request tokens are fresh UUIDs, independent of the
 process-scoped JSON-RPC ID. A stale card can never answer a later question
 whose restarted process happens to reuse the same native ID. The private
 registry maps server resolution back to the current public token.
+
+## Codex nonblocking structured questions
+
+Verified sources: `docs/protocol-schemas/codex-0.164.0-alpha.11.1/AsyncAgentMessage.json` (CLI-generated schema) and `async-question-and-answer-capture.json` (synthetic live capture). Native `request_user_input_async` emits `agentMessage` items with `delivery: async` and structured `questions`, repeated at started/completed; it does not create a reverse-RPC question response channel. The adapter normalizes these to existing Ask cards, keeps opaque per-request tokens and de-duplicates both pending and answered items. It suppresses only the corresponding valid structured item's prose fallback, never guesses from Markdown. Normal turn completion keeps the nonblocking question recoverable; process exit retires it.
+
+Foundation impact: SessionBackend gains defaulted question-answer preparation and send-blocking queries; existing adapters keep their blocking behavior. The Codex adapter prepares validated ordinary user-message content without consuming the request. ConversationService serializes answer preparation, routes async answers through its established message service (history, mid-turn steering, runtime claims and stream relay), then acknowledges the card locally. Rejected message admission leaves it retryable. Explicit decline sends no fabricated JSON-RPC response and no selected answer. Permission and blocking-question gates remain authoritative; only nonblocking questions permit mid-turn messages. No plugin contracts or UI components change.
+
+Question lifecycle logging reuses the existing non-sensitive request-token logs, with asynchronous classification; question and answer content is excluded.

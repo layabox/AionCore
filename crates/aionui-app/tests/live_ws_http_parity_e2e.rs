@@ -1798,6 +1798,144 @@ async fn live_claude_ask_user_question_round_trip() {
     record_frame_types("claude-ask", &frames.lock().unwrap().clone());
 }
 
+/// Verified against the 0.164.0-alpha.11.1 native async capture. The first
+/// turn finishes while the question remains recoverable; an answer opens a
+/// normal tracked user turn and receives a real agent reply.
+#[tokio::test]
+#[ignore = "spawns the real Codex CLI with async questions; needs credentials"]
+async fn live_codex_async_question_round_trip() {
+    run_codex_async_question(true).await;
+}
+
+#[tokio::test]
+#[ignore = "spawns the real Codex CLI with async questions; needs credentials"]
+async fn live_codex_async_question_midturn_round_trip() {
+    run_codex_async_question(false).await;
+}
+
+async fn run_codex_async_question(answer_after_finish: bool) {
+    let app = start_live_app().await;
+    let workspace = tempfile::tempdir().unwrap();
+    let created = http_json(
+        &app,
+        "POST",
+        "/api/conversations",
+        json!({"type":"acp","extra":{"workspace":workspace.path().to_string_lossy(),"backend":"codex"}}),
+    )
+    .await;
+    let id = created["data"]["id"].as_str().unwrap().to_owned();
+    let frames = connect_ws_recorder(app.addr, &app.token).await;
+    let continuation = if answer_after_finish {
+        "Do not use other tools. Finish this turn with Waiting for test answer."
+    } else {
+        "Immediately after asking, run only the shell command sleep 5 to leave time for the user to answer during this turn. Do not modify any files."
+    };
+    let sent = http_json(&app, "POST", &format!("/api/conversations/{id}/messages"), json!({"content":format!("Synthetic UI test only. Call request_user_input_async exactly once to ask one question titled Choose a test layout with options Compact and Spacious. Do not ask in prose. {continuation} When I answer, repeat the selected label and finish.")})).await;
+    assert!(sent["data"]["turn_id"].is_string(), "{sent}");
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let ask = loop {
+        let snapshot = frames.lock().unwrap().clone();
+        let stream = stream_frames_for(&snapshot, &id);
+        if !answer_after_finish || stream.iter().any(|frame| frame["data"]["type"] == "finish") {
+            if let Some(frame) = stream.iter().find(|frame| frame["data"]["type"] == "ask") {
+                break frame["data"]["data"].clone();
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "missing async question or first turn completion"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let token = ask["request_id"].as_str().unwrap();
+    let recovered = http_json(
+        &app,
+        "GET",
+        &format!("/api/conversations/{id}/confirmations"),
+        Value::Null,
+    )
+    .await;
+    assert!(
+        recovered["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|q| q["call_id"] == token && q["questions"][0]["options"][1]["label"] == "Spacious")
+    );
+    let answered = http_json(
+        &app,
+        "POST",
+        &format!("/api/conversations/{id}/asks/{token}/answer"),
+        json!({"answers":[{"question":ask["questions"][0]["question"],"labels":["Spacious"]}]}),
+    )
+    .await;
+    assert_eq!(answered["success"], true, "{answered}");
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        let snapshot = frames.lock().unwrap().clone();
+        let stream = stream_frames_for(&snapshot, &id);
+        let reply = stream
+            .iter()
+            .filter(|f| matches!(f["data"]["type"].as_str(), Some("text" | "content")))
+            .map(|f| f["data"]["data"]["content"].as_str().unwrap_or(""))
+            .collect::<String>();
+        let ends_in_finish = stream
+            .iter()
+            .rev()
+            .find(|f| matches!(f["data"]["type"].as_str(), Some("text" | "content" | "finish")))
+            .is_some_and(|f| f["data"]["type"] == "finish");
+        if ends_in_finish
+            && reply.contains("Spacious")
+            && stream.iter().filter(|f| f["data"]["type"] == "finish").count()
+                >= if answer_after_finish { 2 } else { 1 }
+        {
+            assert!(reply.contains("Spacious"), "answer must reach Codex: {reply}");
+            assert!(
+                stream
+                    .iter()
+                    .any(|f| f["data"]["type"] == "ask_resolved" && f["data"]["data"]["request_id"] == token)
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "async answer did not produce a tracked completed reply"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let snapshot = frames.lock().unwrap().clone();
+    let answer_messages = snapshot
+        .iter()
+        .filter(|frame| {
+            frame["name"] == "message.userCreated"
+                && frame["data"]["conversation_id"] == id
+                && frame["data"]["content"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("Answers to the agent's questions:"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        answer_messages.len(),
+        1,
+        "one user answer must be persisted and broadcast"
+    );
+    assert_eq!(
+        answer_messages[0]["data"]["client_msg_id"].is_string(),
+        !answer_after_finish,
+        "the running-turn case must actually use correlated mid-turn delivery"
+    );
+    let recovered = http_json(
+        &app,
+        "GET",
+        &format!("/api/conversations/{id}/confirmations"),
+        Value::Null,
+    )
+    .await;
+    assert!(recovered["data"].as_array().unwrap().is_empty());
+    app.shutdown(&[&id]).await;
+    println!("[codex-async-ask] question, completion, recovery, ordinary-message answer and reply passed");
+}
+
 /// Real native Codex default-mode question -> shared Ask -> recovery HTTP ->
 /// dedicated answer route -> native response -> resolved stream and completion.
 /// The subprocess-only feature switch is verified by the captured default-mode

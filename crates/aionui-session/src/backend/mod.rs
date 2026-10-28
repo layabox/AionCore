@@ -87,6 +87,21 @@ pub trait SessionBackend: Send + Sync {
     /// returns `BackendError::CommandNotSupported`.
     async fn dispatch(&self, command: Command) -> Result<CommandReceipt, BackendError>;
 
+    /// Some agents deliver nonblocking questions whose answers are ordinary user
+    /// messages. Prepare and validate that message without consuming the card.
+    fn question_answer_message(
+        &self,
+        _request_id: &str,
+        _answers: Option<&[QuestionAnswer]>,
+    ) -> Result<Option<String>, BackendError> {
+        Ok(None)
+    }
+
+    /// Nonblocking question cards must not prevent ordinary mid-turn delivery.
+    fn question_blocks_send(&self, _request_id: &str) -> bool {
+        true
+    }
+
     /// The upward event stream, wrapped in `SessionEnvelope{session_id, turn_gen,
     /// event}`. A process crash flows OUT as `Detached{exit}` (no `wait_for_exit`
     /// on the trait). The orchestrator unwraps `.event` before `step()`.

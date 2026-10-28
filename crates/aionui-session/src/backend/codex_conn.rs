@@ -1747,6 +1747,40 @@ async fn reader_task(
                         // server notification → SessionEvent(s)
                         let cur = turn_gen.load(Ordering::SeqCst);
                         let params = frame.get("params").unwrap_or(&Value::Null);
+                        if matches!(m, "item/started" | "item/completed") {
+                            let item = params.get("item").unwrap_or(&Value::Null);
+                            let async_question = CodexQuestionRequest::parse_async_item(item, cur);
+                            if item.get("delivery").and_then(Value::as_str) == Some("async")
+                                && item.get("questions").is_some_and(|questions| !questions.is_null())
+                                && async_question.is_err()
+                            {
+                                tracing::warn!(conversation_id = %session_id, "invalid Codex async question; preserving prose fallback");
+                            }
+                            if let Ok(request) = async_question {
+                                let mut pending = pending_tool_approvals.lock().unwrap_or_else(|e| e.into_inner());
+                                // started/completed repeat the same native item. Keep
+                                // answered tombstones too: a late completed must not
+                                // resurrect a card already answered from started.
+                                if !pending
+                                    .values()
+                                    .any(|entry| entry.question_wire_id() == Some(&request.wire_id))
+                                {
+                                    let request_id = format!("codex-question:{}", uuid::Uuid::new_v4());
+                                    let questions = request.card();
+                                    pending.insert(request_id.clone(), PendingCodexRequest::Question(request));
+                                    emit(
+                                        &event_tx,
+                                        &session_id,
+                                        cur,
+                                        SessionEvent::Ask {
+                                            request_id: request_id.clone(),
+                                            questions,
+                                        },
+                                    );
+                                    tracing::info!(conversation_id = %session_id, %request_id, asynchronous = true, "Codex native question received");
+                                }
+                            }
+                        }
                         if m == "thread/settings/updated" {
                             let snapshot = {
                                 let mut disc = discovered.lock().unwrap_or_else(|e| e.into_inner());
@@ -3382,6 +3416,7 @@ fn map_item(params: &Value, completed: bool) -> Vec<SessionEvent> {
             // compose the same final text under both shapes. Only the started
             // edge — the completed frame repeats the same text (double-emit).
             if !completed
+                && CodexQuestionRequest::parse_async_item(item, 0).is_err()
                 && let Some(text) = item.get("text").and_then(Value::as_str)
                 && !text.is_empty()
             {
@@ -4503,7 +4538,12 @@ impl SessionBackend for CodexSessionBackend {
                     }
                 };
                 let frame = request.response(answers.as_deref())?;
-                self.write_frame(frame).await?;
+                if !request.asynchronous {
+                    self.write_frame(frame).await?;
+                }
+                // Async answers were accepted through the conversation's normal
+                // message service before this local acknowledgement; there is no
+                // reverse-RPC to answer (verified: synthetic async capture).
                 // Keep recovery retryable on write failure; retire only after flush.
                 let resolved_here = {
                     let mut pending = self.pending_tool_approvals.lock().unwrap_or_else(|e| e.into_inner());
@@ -4519,7 +4559,7 @@ impl SessionBackend for CodexSessionBackend {
                         false
                     }
                 };
-                tracing::info!(conversation_id = %self.session_id, %request_id, answered = answers.is_some(), "Codex native question response written");
+                tracing::info!(conversation_id = %self.session_id, %request_id, answered = answers.is_some(), asynchronous = request.asynchronous, "Codex question answer acknowledged");
                 if resolved_here {
                     emit(
                         &self.event_tx,
@@ -4906,6 +4946,25 @@ impl SessionBackend for CodexSessionBackend {
         }
         caps.service_tier = disc.service_tier.snapshot();
         caps
+    }
+
+    fn question_answer_message(
+        &self,
+        request_id: &str,
+        answers: Option<&[super::types::QuestionAnswer]>,
+    ) -> Result<Option<String>, BackendError> {
+        let pending = self.pending_tool_approvals.lock().unwrap_or_else(|e| e.into_inner());
+        match pending.get(request_id) {
+            Some(PendingCodexRequest::Question(request)) if request.asynchronous => {
+                request.answer_message(answers).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn question_blocks_send(&self, request_id: &str) -> bool {
+        let pending = self.pending_tool_approvals.lock().unwrap_or_else(|e| e.into_inner());
+        !matches!(pending.get(request_id), Some(PendingCodexRequest::Question(request)) if request.asynchronous)
     }
 
     /// REST-recovery (`GET /confirmations`) source: the transient registry of
@@ -5616,6 +5675,92 @@ mod tests {
         assert!(
             backend.pending_permission_requests().is_empty(),
             "recovery list EMPTY after the approval is answered"
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_questions_async_recovery_answer_no_rpc_and_late_completed_dedup() {
+        let capture: Value = serde_json::from_str(include_str!(
+            "../../../../docs/protocol-schemas/codex-0.164.0-alpha.11.1/async-question-and-answer-capture.json"
+        ))
+        .unwrap();
+        let frame = capture
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|frame| frame["method"] == "item/started" && frame["params"]["item"]["questions"].is_array())
+            .unwrap()
+            .clone();
+        assert!(
+            !map_notification("item/started", &frame["params"])
+                .iter()
+                .any(|event| matches!(event, SessionEvent::MessageDelta { .. })),
+            "structured questions must not also become an inert prose list"
+        );
+        let mut completed = frame.clone();
+        completed["method"] = json!("item/completed");
+        let fake = FakeAgentIo::never_exits(Vec::new()).with_gated_segments(vec![
+            format!("{frame}\n").into_bytes(),
+            format!("{completed}\n").into_bytes(),
+        ]);
+        let captured = fake.captured_stdin();
+        let release = fake.segment_releaser();
+        let backend = CodexSessionBackend::build_with_io("codex-async", Box::new(fake)).await;
+        let mut events = backend.events();
+        release();
+        let request_id = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while let Some(env) = events.next().await {
+                if let SessionEvent::Ask { request_id, questions } = env.event {
+                    assert_eq!(questions[0]["options"][1]["label"], "Spacious");
+                    return request_id;
+                }
+            }
+            panic!("missing async card");
+        })
+        .await
+        .unwrap();
+        assert_eq!(backend.pending_permission_requests().len(), 1);
+        assert!(!backend.question_blocks_send(&request_id));
+        let answers = vec![super::super::types::QuestionAnswer {
+            question: "Choose a test layout".into(),
+            labels: vec!["Spacious".into()],
+        }];
+        assert!(backend.question_answer_message(&request_id, Some(&[])).is_err());
+        assert!(
+            backend
+                .question_answer_message(&request_id, Some(&answers))
+                .unwrap()
+                .unwrap()
+                .contains("Spacious")
+        );
+        let before = captured_str(&captured).await;
+        backend
+            .dispatch(Command::AnswerAsk {
+                request_id: request_id.clone(),
+                answers: Some(answers),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            captured_str(&captured).await,
+            before,
+            "async acknowledgement must not fabricate a reverse-RPC response"
+        );
+        assert!(backend.pending_permission_requests().is_empty());
+        release();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(
+            backend.pending_permission_requests().is_empty(),
+            "late completed must not resurrect an answered card"
+        );
+        assert!(
+            backend
+                .dispatch(Command::AnswerAsk {
+                    request_id,
+                    answers: None
+                })
+                .await
+                .is_err()
         );
     }
 

@@ -383,6 +383,24 @@ impl AgentInstance {
         }
     }
 
+    pub fn question_blocks_send(&self, request_id: &str) -> bool {
+        match self {
+            Self::Session(task) => task.question_blocks_send(request_id),
+            _ => true,
+        }
+    }
+
+    pub fn question_answer_message(
+        &self,
+        request_id: &str,
+        answers: Option<&[aionui_api_types::AskQuestionAnswer]>,
+    ) -> Result<Option<String>, AgentError> {
+        match self {
+            Self::Session(task) => task.question_answer_message(request_id, answers),
+            _ => Ok(None),
+        }
+    }
+
     /// Check whether an action is auto-approved in this session.
     pub fn check_approval(&self, action: &str, command_type: Option<&str>) -> bool {
         match self {

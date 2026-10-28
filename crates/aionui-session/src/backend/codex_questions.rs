@@ -1,6 +1,8 @@
 //! Codex native question mapping. Verified against the installed codex-cli 0.161.0
 //! `app-server generate-json-schema --experimental` output, checked in under
 //! docs/protocol-schemas/codex-0.161.0/ToolRequestUserInput{Params,Response}.json.
+//! Async items are verified against CLI 0.164.0-alpha.11.1 schema and live capture
+//! under docs/protocol-schemas/codex-0.164.0-alpha.11.1/.
 //! Raw question IDs stay here; the shared Ask/AnswerAsk contract uses display text.
 
 use super::types::{BackendError, QuestionAnswer};
@@ -34,6 +36,7 @@ pub(super) struct CodexQuestionRequest {
     pub wire_id: Value,
     pub turn_gen: u64,
     pub blocking: bool,
+    pub asynchronous: bool,
     questions: Vec<Question>,
 }
 
@@ -108,7 +111,67 @@ impl CodexQuestionRequest {
             wire_id,
             turn_gen,
             blocking: blocking.unwrap_or(true),
+            asynchronous: false,
             questions,
+        })
+    }
+
+    /// Verified: codex-0.164.0-alpha.11.1 ServerNotification.json
+    /// AgentMessageThreadItem.questions and the synthetic async live capture.
+    pub fn parse_async_item(item: &Value, turn_gen: u64) -> Result<Self, BackendError> {
+        let invalid = || BackendError::Transport("invalid Codex async question payload".into());
+        if item.get("type").and_then(Value::as_str) != Some("agentMessage")
+            || item.get("delivery").and_then(Value::as_str) != Some("async")
+        {
+            return Err(invalid());
+        }
+        let id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(invalid)?;
+        let questions = item.get("questions").and_then(Value::as_array).ok_or_else(invalid)?;
+        let mut normalized = Vec::new();
+        for (index, question) in questions.iter().enumerate() {
+            let title = question.get("title").and_then(Value::as_str).ok_or_else(invalid)?;
+            let options = match question.get("options") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(options)) => options
+                    .iter()
+                    .map(|option| {
+                        option
+                            .as_str()
+                            .map(|label| json!({"label": label, "description": ""}))
+                            .ok_or_else(invalid)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                _ => return Err(invalid()),
+            };
+            normalized.push(json!({"id": index.to_string(), "header": "", "question": title, "options": options}));
+        }
+        let mut request = Self::parse(
+            Value::String(id.into()),
+            json!({"questions": normalized, "isBlocking": false}),
+            turn_gen,
+        )?;
+        request.asynchronous = true;
+        Ok(request)
+    }
+
+    pub fn answer_message(&self, answers: Option<&[QuestionAnswer]>) -> Result<String, BackendError> {
+        self.response(answers)?;
+        Ok(match answers {
+            Some(answers) => format!(
+                "Answers to the agent's questions:\n{}",
+                serde_json::to_string(
+                    &answers
+                        .iter()
+                        .map(|answer| json!({"question": answer.question, "answers": answer.labels}))
+                        .collect::<Vec<_>>()
+                )
+                .map_err(|_| BackendError::Transport("invalid Codex question answers".into()))?
+            ),
+            None => String::new(),
         })
     }
 
@@ -160,6 +223,48 @@ impl CodexQuestionRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_questions_async_captured_shape_and_full_answer_validation() {
+        let capture: Value = serde_json::from_str(include_str!(
+            "../../../../docs/protocol-schemas/codex-0.164.0-alpha.11.1/async-question-and-answer-capture.json"
+        ))
+        .unwrap();
+        let frame = capture
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|frame| frame["params"]["item"]["questions"].is_array())
+            .unwrap();
+        let request = CodexQuestionRequest::parse_async_item(&frame["params"]["item"], 4).unwrap();
+        assert!(request.asynchronous);
+        assert!(!request.blocking);
+        assert_eq!(request.card()[0]["question"], "Choose a test layout");
+        assert_eq!(request.card()[0]["options"][1]["label"], "Spacious");
+        assert!(request.answer_message(Some(&[])).is_err());
+        let answer = request
+            .answer_message(Some(&[QuestionAnswer {
+                question: "Choose a test layout".into(),
+                labels: vec!["Spacious".into()],
+            }]))
+            .unwrap();
+        assert!(answer.contains("Spacious"));
+        assert!(request.answer_message(None).unwrap().is_empty());
+        assert!(
+            CodexQuestionRequest::parse_async_item(
+                &json!({"type":"agentMessage","delivery":"async","id":"x","questions":[{"title":"Q","options":[1]}]}),
+                0
+            )
+            .is_err()
+        );
+        assert!(
+            CodexQuestionRequest::parse_async_item(
+                &json!({"type":"agentMessage","id":"x","text":"Plain prose with options"}),
+                0
+            )
+            .is_err()
+        );
+    }
 
     fn request(id: Value) -> CodexQuestionRequest {
         CodexQuestionRequest::parse(id, json!({ "questions": [

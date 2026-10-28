@@ -768,6 +768,29 @@ impl SessionAgentTask {
     /// permission confirm endpoint). `answers: None` = the user dismissed the
     /// card; the claude adapter maps that to a deny (an allow with no answers
     /// is silent data loss — claude drops unanswered questions, live 2.1.178).
+    pub fn question_blocks_send(&self, request_id: &str) -> bool {
+        self.backend.question_blocks_send(request_id)
+    }
+
+    pub fn question_answer_message(
+        &self,
+        request_id: &str,
+        answers: Option<&[aionui_api_types::AskQuestionAnswer]>,
+    ) -> Result<Option<String>, AgentError> {
+        let answers = answers.map(|answers| {
+            answers
+                .iter()
+                .map(|answer| aionui_session::QuestionAnswer {
+                    question: answer.question.clone(),
+                    labels: answer.labels.clone(),
+                })
+                .collect::<Vec<_>>()
+        });
+        self.backend
+            .question_answer_message(request_id, answers.as_deref())
+            .map_err(|error| AgentError::BadRequest(error.to_string()))
+    }
+
     pub async fn answer_ask(
         &self,
         request_id: &str,
