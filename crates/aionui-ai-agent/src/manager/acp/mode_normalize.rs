@@ -127,6 +127,7 @@ mod tests {
     fn metadata_with_yolo_id(yolo_id: Option<&str>) -> AgentMetadata {
         use aionui_api_types::{AgentSource, AgentSourceInfo, BehaviorPolicy};
         AgentMetadata {
+            additional_args: Vec::new(),
             id: "test".into(),
             icon: None,
             name: "Test".into(),

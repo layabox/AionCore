@@ -773,3 +773,198 @@ async fn internal_aion_cli_rejects_overrides() {
     assert!(gbody["data"]["command_override"].is_null());
     assert!(gbody["data"]["env_override"].as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn launch_arguments_roundtrip_is_independent_and_does_not_probe() {
+    let (mut app, services, _) = build_app_with_mock_tasks().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
+    upsert_visible_agent_metadata(&services, "launch-agent", "acp").await;
+    let repo = services.agent_registry.repo_handle();
+    repo.update_agent_overrides(
+        "launch-agent",
+        Some("/existing/tool"),
+        Some(r#"[{"name":"EXISTING","value":"kept"}]"#),
+    )
+    .await
+    .unwrap();
+    let before = repo.get("launch-agent").await.unwrap().unwrap();
+    let arguments = json!([
+        "-c",
+        "suppress_unstable_features_warning=true",
+        "path with spaces",
+        "",
+        "中文"
+    ]);
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "PUT",
+            "/api/agents/launch-agent/launch-arguments",
+            json!({"additional_args": arguments}),
+            &token,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_json(response).await["data"]["additional_args"], arguments);
+    let after = repo.get("launch-agent").await.unwrap().unwrap();
+    assert_eq!(after.command_override, before.command_override);
+    assert_eq!(after.env_override, before.env_override);
+    assert_eq!(after.args, before.args);
+    assert_eq!(
+        after.last_check_at, before.last_check_at,
+        "saving argv must not perform a health check"
+    );
+    assert_eq!(after.last_check_kind, before.last_check_kind);
+    let cached = services.agent_registry.get("launch-agent").await.unwrap();
+    assert_eq!(serde_json::to_value(cached.additional_args).unwrap(), arguments);
+    let response = app
+        .clone()
+        .oneshot(get_with_token("/api/agents/launch-agent/overrides", &token))
+        .await
+        .unwrap();
+    assert_eq!(body_json(response).await["data"]["additional_args"], arguments);
+    let response = app
+        .clone()
+        .oneshot(get_with_token("/api/agents/management", &token))
+        .await
+        .unwrap();
+    assert!(
+        !body_json(response)
+            .await
+            .to_string()
+            .contains("suppress_unstable_features_warning"),
+        "management list must not expose argument values"
+    );
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "PUT",
+            "/api/agents/launch-agent/launch-arguments",
+            json!({"additional_args": []}),
+            &token,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        services
+            .agent_registry
+            .get("launch-agent")
+            .await
+            .unwrap()
+            .additional_args
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn launch_arguments_reject_invalid_inputs_and_require_auth_and_csrf() {
+    let (mut app, services, _) = build_app_with_mock_tasks().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
+    upsert_visible_agent_metadata(&services, "launch-validation", "acp").await;
+    let uri = "/api/agents/launch-validation/launch-arguments";
+    for (arguments, message) in [
+        (json!(["bad\u{0}argument"]), "must not contain NUL"),
+        (json!(vec!["x"; 129]), "count or length limit"),
+        (json!(["x".repeat(32769)]), "count or length limit"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(json_with_token(
+                "PUT",
+                uri,
+                json!({"additional_args": arguments}),
+                &token,
+                &csrf,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(body_json(response).await.to_string().contains(message));
+    }
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "PUT",
+            uri,
+            json!({"additional_args": []}),
+            "invalid",
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "PUT",
+            uri,
+            json!({"additional_args": []}),
+            &token,
+            "invalid",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "PUT",
+            "/api/agents/missing/launch-arguments",
+            json!({"additional_args": []}),
+            &token,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(body_json(response).await.to_string().contains("not found"));
+}
+
+#[tokio::test]
+async fn launch_arguments_do_not_cross_custom_agent_ownership() {
+    let (mut app, services, _) = build_app_with_mock_tasks().await;
+    let (admin, admin_csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "POST",
+            "/api/agents/custom",
+            json!({"name":"Owned launch args", "command":"missing-launch-fixture"}),
+            &admin,
+            &admin_csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let created = body_json(response).await;
+    let id = created["data"]["id"].as_str().unwrap();
+    let (other, other_csrf) = setup_and_login(&mut app, &services, "other-launch-user", "Pass123!").await;
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "PUT",
+            &format!("/api/agents/{id}/launch-arguments"),
+            json!({"additional_args":["--foreign"]}),
+            &other,
+            &other_csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(body_json(response).await.to_string().contains("not found"));
+    assert!(
+        services
+            .agent_registry
+            .repo_handle()
+            .get(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .additional_args
+            .is_none()
+    );
+}

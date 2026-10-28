@@ -203,6 +203,7 @@ pub(super) async fn build(
         &meta,
     )
     .await;
+    command_spec.args.extend(meta.additional_args.iter().cloned());
     command_spec.args.extend(acp_delivery.plan.extra_args.iter().cloned());
 
     let session_snapshot = build_context.session_snapshot;
@@ -902,6 +903,7 @@ mod tests {
         let _runtime_mode = BundledRuntimeModeGuard::install(runtime.path());
 
         let mut meta = aionui_api_types::AgentMetadata {
+            additional_args: Vec::new(),
             id: "agent-1".into(),
             icon: None,
             name: "Test ACP".into(),

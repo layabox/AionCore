@@ -168,6 +168,39 @@ impl AgentService {
         self.availability.run_manual_health_check(user_id, id).await
     }
 
+    pub async fn set_agent_launch_arguments(
+        &self,
+        user_id: &str,
+        id: &str,
+        req: aionui_api_types::AgentLaunchArguments,
+    ) -> Result<aionui_api_types::AgentLaunchArguments, AgentError> {
+        let repo = self.registry.repo_handle();
+        let row = repo
+            .get_for_user(user_id, id)
+            .await
+            .map_err(|e| AgentError::internal(format!("load launch arguments: {e}")))?
+            .ok_or_else(|| AgentError::not_found(format!("Agent '{id}' not found")))?;
+        validate_launch_arguments(&req.additional_args)?;
+        if is_internal_aion_cli_row(&row) && !req.additional_args.is_empty() {
+            return Err(AgentError::bad_request(
+                "Internal Aion CLI does not support launch arguments",
+            ));
+        }
+        let encoded =
+            serde_json::to_string(&req.additional_args).map_err(|_| AgentError::internal("encode launch arguments"))?;
+        if !repo
+            .set_agent_launch_arguments_for_user(user_id, id, &encoded)
+            .await
+            .map_err(|e| AgentError::internal(format!("save launch arguments: {e}")))?
+        {
+            return Err(AgentError::not_found(format!("Agent '{id}' not found")));
+        }
+        // Refresh cached metadata only. No manual health check or process restart.
+        self.registry.hydrate().await?;
+        tracing::info!(agent_id = %id, argument_count = req.additional_args.len(), "agent launch arguments saved");
+        Ok(req)
+    }
+
     pub async fn get_agent_overrides(
         &self,
         user_id: &str,
@@ -194,8 +227,25 @@ impl AgentService {
                 row.command_override
             },
             env_override,
+            additional_args: row
+                .additional_args
+                .as_deref()
+                .and_then(|raw| serde_json::from_str(raw).ok())
+                .unwrap_or_default(),
         })
     }
+}
+
+fn validate_launch_arguments(arguments: &[String]) -> Result<(), AgentError> {
+    if arguments.len() > 128 || arguments.iter().map(String::len).sum::<usize>() > 32768 {
+        return Err(AgentError::bad_request(
+            "Launch arguments exceed the count or length limit",
+        ));
+    }
+    if arguments.iter().any(|argument| argument.contains('\0')) {
+        return Err(AgentError::bad_request("Launch arguments must not contain NUL"));
+    }
+    Ok(())
 }
 
 /// True when the row is launched through a bridge binary (e.g. `npx`) rather

@@ -1779,6 +1779,7 @@ mod tests {
 
     fn codex_metadata(yolo_id: Option<&str>) -> AgentMetadata {
         AgentMetadata {
+            additional_args: Vec::new(),
             id: "codex".into(),
             icon: None,
             name: "Codex".into(),

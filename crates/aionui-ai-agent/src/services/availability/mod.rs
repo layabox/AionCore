@@ -621,6 +621,7 @@ mod tests {
         registry.hydrate().await.unwrap();
 
         let meta = AgentMetadata {
+            additional_args: Vec::new(),
             id: "agent-managed-builtin".into(),
             icon: None,
             name: "Claude Code".into(),
@@ -892,6 +893,7 @@ mod tests {
         let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(db.pool().clone()));
 
         let meta = AgentMetadata {
+            additional_args: Vec::new(),
             id: "agent-fallback-builtin".into(),
             icon: None,
             name: "Fallback Builtin".into(),

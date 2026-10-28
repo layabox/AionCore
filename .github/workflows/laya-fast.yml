@@ -1,7 +1,7 @@
 name: LayaAir ACPCore runtime
 on:
   push:
-    branches: [codex/fast-mode, codex/request-user-input]
+    branches: [codex/fast-mode, codex/request-user-input, codex/agent-launch-arguments]
   workflow_dispatch:
 permissions:
   contents: read
@@ -11,11 +11,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          - os: macos-15-intel
             platform: darwin-arm64
+            target: aarch64-apple-darwin
             binary: aioncore
           - os: windows-latest
             platform: win32-x64
+            target: x86_64-pc-windows-msvc
             binary: aioncore.exe
     runs-on: ${{ matrix.os }}
     steps:
@@ -23,34 +25,39 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.95.0'
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ runner.os == 'macOS' && 'macos-intel-to-arm64' || '' }}
       - name: Avoid Git link.exe shadowing MSVC
         if: runner.os == 'Windows'
         shell: pwsh
         run: Remove-Item 'C:\Program Files\Git\usr\bin\link.exe' -Force -ErrorAction SilentlyContinue
       - run: cargo test -p aionui-session --lib service_tier --locked
       - run: cargo test -p aionui-session --lib codex_questions --locked
+      - run: cargo test -p aionui-session --lib spawner --locked
       - run: cargo test -p aionui-ai-agent --lib service_tier --locked
       - name: Build release runtime
-        shell: bash
         env:
-          # Rust 1.95's stripping can misalign Mach-O LINKEDIT on macOS 27.
-          # https://github.com/rust-lang/rust/issues/157750
           CARGO_PROFILE_RELEASE_STRIP: 'none'
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
-        run: |
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            cargo build --release --target x86_64-pc-windows-msvc -p aionui-app --locked
-            cp target/x86_64-pc-windows-msvc/release/aioncore.exe target/release/aioncore.exe
-          else
-            cargo build --release -p aionui-app --locked
-          fi
-      - name: Verify Windows runtime has no VC redistributable dependency
+        run: cargo build --release --target ${{ matrix.target }} -p aionui-app --locked
+      - name: Verify Windows runtime imports and version
         if: runner.os == 'Windows'
-        run: python scripts/check-windows-runtime-imports.py target/release/aioncore.exe
-      - run: ./target/release/${{ matrix.binary }} --version
+        shell: pwsh
+        run: |
+          python scripts/check-windows-runtime-imports.py target/${{ matrix.target }}/release/${{ matrix.binary }}
+          ./target/${{ matrix.target }}/release/${{ matrix.binary }} --version
+      - name: Verify macOS runtime linkage
+        if: runner.os == 'macOS'
+        run: |
+          file target/${{ matrix.target }}/release/${{ matrix.binary }}
+          otool -L target/${{ matrix.target }}/release/${{ matrix.binary }}
+      - name: Verify architecture and write build provenance
+        run: python scripts/write-runtime-provenance.py --platform ${{ matrix.platform }} --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.binary }} --output release-artifact
       - uses: actions/upload-artifact@v4
         with:
           name: acp-core-${{ matrix.platform }}-${{ github.sha }}
-          path: target/release/${{ matrix.binary }}
+          path: release-artifact/
           retention-days: 14
+          if-no-files-found: error

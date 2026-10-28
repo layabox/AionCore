@@ -742,6 +742,7 @@ fn stub_agent_metadata_rows() -> Vec<AgentMetadataRow> {
     ]
     .into_iter()
     .map(|(id, backend, agent_type, name, sort_order)| AgentMetadataRow {
+        additional_args: None,
         id: id.to_owned(),
         user_id: None,
         icon: None,
@@ -903,6 +904,7 @@ struct ClaudeNativeSkillMetadataRepo;
 
 fn claude_metadata_row() -> AgentMetadataRow {
     AgentMetadataRow {
+        additional_args: None,
         id: "agent-claude".into(),
         user_id: None,
         icon: None,

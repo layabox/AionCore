@@ -107,6 +107,7 @@ mod tests {
 
     fn agent_metadata_with_backend(backend: Option<&str>) -> AgentMetadata {
         AgentMetadata {
+            additional_args: Vec::new(),
             id: "agent-1".into(),
             icon: None,
             name: "Test ACP".into(),

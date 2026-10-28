@@ -11,6 +11,7 @@ async fn probe_resolved_command_keeps_bridge_but_version_probe_targets_primary_c
     }
 
     let mut meta = AgentMetadata {
+        additional_args: Vec::new(),
         id: "agent-1".into(),
         icon: None,
         name: "Test ACP".into(),
@@ -74,6 +75,7 @@ async fn probe_resolved_command_keeps_bridge_but_version_probe_targets_primary_c
 #[test]
 fn probe_resolved_command_requires_primary_binary_for_builtin_managed_claude() {
     let meta = AgentMetadata {
+        additional_args: Vec::new(),
         id: "agent-claude".into(),
         icon: None,
         name: "Claude Code".into(),
@@ -124,6 +126,7 @@ fn probe_resolved_command_requires_primary_binary_for_builtin_managed_claude() {
 #[test]
 fn probe_resolved_command_requires_primary_binary_for_builtin_managed_codex() {
     let meta = AgentMetadata {
+        additional_args: Vec::new(),
         id: "agent-codex".into(),
         icon: None,
         name: "Codex".into(),

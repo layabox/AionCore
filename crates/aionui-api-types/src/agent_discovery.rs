@@ -188,6 +188,9 @@ pub struct AgentMetadata {
     pub resolved_command: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    /// Runtime-only launch policy; values are exposed only by the authenticated overrides endpoint.
+    #[serde(default, skip)]
+    pub additional_args: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<AgentEnvEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -355,6 +358,7 @@ mod tests {
     #[test]
     fn agent_metadata_skips_empty_fields() {
         let meta = AgentMetadata {
+            additional_args: Vec::new(),
             id: "abc12345".into(),
             icon: None,
             name: "Claude".into(),

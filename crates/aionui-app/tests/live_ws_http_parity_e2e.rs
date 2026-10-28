@@ -1813,8 +1813,23 @@ async fn live_codex_async_question_midturn_round_trip() {
     run_codex_async_question(false).await;
 }
 
+async fn configure_live_codex_questions(app: &LiveApp) {
+    let agents = http_get(app, "/api/agents/management").await;
+    let id = agents["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["backend"] == "codex")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let result = http_json(app, "PUT", &format!("/api/agents/{id}/launch-arguments"), json!({"additional_args":["-c", "features.default_mode_request_user_input=true", "-c", "suppress_unstable_features_warning=true"]})).await;
+    assert!(result["data"]["additional_args"].is_array(), "{result}");
+}
+
 async fn run_codex_async_question(answer_after_finish: bool) {
     let app = start_live_app().await;
+    configure_live_codex_questions(&app).await;
     let workspace = tempfile::tempdir().unwrap();
     let created = http_json(
         &app,
@@ -1944,6 +1959,7 @@ async fn run_codex_async_question(answer_after_finish: bool) {
 #[ignore = "spawns the real codex CLI; needs credentials"]
 async fn live_codex_request_user_input_round_trip() {
     let app = start_live_app().await;
+    configure_live_codex_questions(&app).await;
     let workspace = tempfile::tempdir().unwrap();
     let created = http_json(
         &app,

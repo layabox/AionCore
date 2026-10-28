@@ -74,6 +74,8 @@ pub struct AgentMetadataRow {
 
     pub command_override: Option<String>,
     pub env_override: Option<String>,
+    /// JSON argv appended to the managed launch without changing registry seed arguments.
+    pub additional_args: Option<String>,
 
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,

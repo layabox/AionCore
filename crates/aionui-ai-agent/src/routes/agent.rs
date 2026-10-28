@@ -13,9 +13,9 @@ use axum::extract::{Extension, Json, Path, State};
 use axum::routing::{get, patch, post, put};
 
 use aionui_api_types::{
-    AgentLogoEntry, AgentManagementRow, AgentMetadata, AgentOverridesResponse, ApiResponse, CustomAgentUpsertRequest,
-    DeleteCustomAgentResponse, ProviderHealthCheckRequest, ProviderHealthCheckResponse, SetAgentOverridesRequest,
-    SetEnabledRequest, TryConnectCustomAgentRequest, TryConnectCustomAgentResponse,
+    AgentLaunchArguments, AgentLogoEntry, AgentManagementRow, AgentMetadata, AgentOverridesResponse, ApiResponse,
+    CustomAgentUpsertRequest, DeleteCustomAgentResponse, ProviderHealthCheckRequest, ProviderHealthCheckResponse,
+    SetAgentOverridesRequest, SetEnabledRequest, TryConnectCustomAgentRequest, TryConnectCustomAgentResponse,
 };
 use aionui_auth::CurrentUser;
 use aionui_common::ApiError;
@@ -30,6 +30,7 @@ pub fn agent_routes(state: AgentRouterState) -> Router {
         .route("/api/agents/{id}/health-check", post(health_check_by_id))
         .route("/api/agents/provider-health-check", post(provider_health_check))
         .route("/api/agents/{id}/enabled", patch(set_agent_enabled))
+        .route("/api/agents/{id}/launch-arguments", put(set_agent_launch_arguments))
         .route(
             "/api/agents/{id}/overrides",
             get(get_agent_overrides).put(set_agent_overrides),
@@ -195,6 +196,22 @@ async fn set_agent_overrides(
         state
             .service
             .set_agent_overrides(&user.id, &id, req)
+            .await
+            .map_err(agent_error_to_api_error)?,
+    )))
+}
+
+async fn set_agent_launch_arguments(
+    State(state): State<AgentRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    body: Result<Json<AgentLaunchArguments>, JsonRejection>,
+) -> Result<Json<ApiResponse<AgentLaunchArguments>>, ApiError> {
+    let Json(req) = body.map_err(ApiError::from)?;
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .set_agent_launch_arguments(&user.id, &id, req)
             .await
             .map_err(agent_error_to_api_error)?,
     )))

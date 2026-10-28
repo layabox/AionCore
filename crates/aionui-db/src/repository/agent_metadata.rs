@@ -111,6 +111,18 @@ pub trait IAgentMetadataRepository: Send + Sync {
         env_override: Option<&str>,
     ) -> Result<(), DbError>;
 
+    /// Persist argv without modifying command/environment overrides or registry seeds.
+    async fn set_agent_launch_arguments_for_user(
+        &self,
+        _user_id: &str,
+        _id: &str,
+        _additional_args: &str,
+    ) -> Result<bool, DbError> {
+        Err(DbError::Init(
+            "Agent launch arguments are not supported by this repository".into(),
+        ))
+    }
+
     /// Toggle the `enabled` flag. Returns `true` if a row was updated.
     async fn set_enabled(&self, id: &str, enabled: bool) -> Result<bool, DbError>;
 

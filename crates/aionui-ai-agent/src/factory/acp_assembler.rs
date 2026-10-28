@@ -153,6 +153,7 @@ mod tests {
 
     fn test_metadata() -> AgentMetadata {
         AgentMetadata {
+            additional_args: Vec::new(),
             id: "agent-1".into(),
             icon: None,
             name: "Test ACP".into(),

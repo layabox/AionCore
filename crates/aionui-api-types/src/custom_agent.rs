@@ -25,6 +25,14 @@ pub struct AgentOverridesResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command_override: Option<String>,
     pub env_override: Vec<AgentEnvEntry>,
+    pub additional_args: Vec<String>,
+}
+
+/// Persisted literal argv for the next created session backend. An empty array clears it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentLaunchArguments {
+    pub additional_args: Vec<String>,
 }
 
 /// Payload shared by `POST /api/agents/custom` and

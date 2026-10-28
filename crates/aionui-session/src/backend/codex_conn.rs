@@ -48,9 +48,6 @@ use futures_util::stream::{BoxStream, StreamExt};
 const CODEX_CONFIG_FLAG: &str = "-c";
 const CODEX_ENV_POLICY_INHERIT_ALL: &str = "shell_environment_policy.inherit=all";
 const CODEX_ENV_POLICY_CLEAR_INCLUDE_ONLY: &str = "shell_environment_policy.include_only=[]";
-// Verified: codex-cli 0.161.0 `features list` names this switch; the checked-in
-// default-mode live capture proves it exposes request_user_input outside Plan.
-const CODEX_DEFAULT_MODE_QUESTIONS: &str = "features.default_mode_request_user_input=true";
 
 /// Config overrides that make Codex command-execution children inherit the
 /// runtime environment injected into the app-server process.
@@ -72,7 +69,6 @@ fn codex_app_server_args(extra_args: &[String]) -> Vec<String> {
     // Append the compatibility policy after user/configured extras, matching
     // the former ACP launch policy and making these final overrides authoritative.
     args.extend(codex_shell_environment_policy_args().map(str::to_owned));
-    args.extend([CODEX_CONFIG_FLAG.to_owned(), CODEX_DEFAULT_MODE_QUESTIONS.to_owned()]);
     args
 }
 
@@ -9081,7 +9077,13 @@ mod tests {
                 },
                 SessionConfig {
                     cwd: Some("/tmp/work".into()),
-                    extra_args: vec!["--flag".into()],
+                    extra_args: vec![
+                        "--flag".into(),
+                        "-c".into(),
+                        "features.default_mode_request_user_input=false".into(),
+                        "-c".into(),
+                        "suppress_unstable_features_warning=true".into(),
+                    ],
                     spawn_env: vec![aionui_common::EnvVar {
                         name: "AIONUI_CONVERSATION_ID".into(),
                         value: "conv-1".into(),
@@ -9105,11 +9107,13 @@ mod tests {
                 "app-server",
                 "--flag",
                 "-c",
+                "features.default_mode_request_user_input=false",
+                "-c",
+                "suppress_unstable_features_warning=true",
+                "-c",
                 "shell_environment_policy.inherit=all",
                 "-c",
                 "shell_environment_policy.include_only=[]",
-                "-c",
-                "features.default_mode_request_user_input=true",
             ],
             "every app-server spawn must explicitly propagate the parent environment to commandExecution shells"
         );
@@ -10279,7 +10283,7 @@ mod tests {
     async fn f4_suspend_then_wake_respawns_through_spawner() {
         use crate::testing::FakeSpawner;
         let spawner = Arc::new(FakeSpawner::new());
-        let backend = CodexSessionBackend::build_with_io_suspending(
+        let mut backend = CodexSessionBackend::build_with_io_suspending(
             "codex-resume-1",
             Box::new(FakeAgentIo::never_exits(Vec::new())),
             spawner.clone(),
@@ -10288,6 +10292,12 @@ mod tests {
         .await;
         // The resume anchor that survives the suspend (live path binds it from
         // thread/started; seed it here).
+        backend.wake.config.extra_args = vec![
+            "-c".into(),
+            "features.default_mode_request_user_input=true".into(),
+            "-c".into(),
+            "suppress_unstable_features_warning=true".into(),
+        ];
         backend.seed_thread_binding_for_test("th-anchor-1").await;
         assert!(backend.idle_timer.is_some(), "idle timer spawned when ttl is Some");
 
@@ -10320,11 +10330,13 @@ mod tests {
             [
                 "app-server",
                 "-c",
+                "features.default_mode_request_user_input=true",
+                "-c",
+                "suppress_unstable_features_warning=true",
+                "-c",
                 "shell_environment_policy.inherit=all",
                 "-c",
                 "shell_environment_policy.include_only=[]",
-                "-c",
-                "features.default_mode_request_user_input=true",
             ],
             "wake must restore the same explicit commandExecution environment policy as the initial spawn"
         );

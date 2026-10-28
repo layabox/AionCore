@@ -780,6 +780,7 @@ fn decode_row(
     availability: AvailabilityProjection,
 ) -> Option<(AgentMetadata, Option<UnavailableReason>)> {
     // Extract override fields before row is partially moved
+    let additional_args_raw = row.additional_args.clone();
     let command_override_raw = row.command_override.clone();
     let env_override_raw = row.env_override.clone();
 
@@ -824,6 +825,7 @@ fn decode_row(
         || aionui_common::constants::is_team_capable(persisted_backend, handshake.agent_capabilities.as_ref());
 
     let mut meta = AgentMetadata {
+        additional_args: Vec::new(),
         id: row.id,
         icon: row.icon,
         name: row.name,
@@ -881,6 +883,10 @@ fn decode_row(
             name = %meta.name,
             "Ignoring environment overrides for internal Aion CLI agent"
         );
+    }
+
+    if !is_internal_aion_cli {
+        meta.additional_args = decode_json_field(additional_args_raw.as_deref(), "additional_args").unwrap_or_default();
     }
 
     meta.has_command_override = command_override.is_some() && !is_internal_aion_cli;
@@ -2118,6 +2124,7 @@ mod tests {
     fn decode_row_applies_command_override() {
         use aionui_db::AgentMetadataRow;
         let row = AgentMetadataRow {
+            additional_args: None,
             id: "test-agent".to_string(),
             user_id: None,
             icon: None,
@@ -2166,6 +2173,7 @@ mod tests {
     fn decode_row_ignores_internal_aion_cli_overrides() {
         use aionui_db::AgentMetadataRow;
         let row = AgentMetadataRow {
+            additional_args: None,
             id: "632f31d2".to_string(),
             user_id: None,
             icon: None,
@@ -2223,6 +2231,7 @@ mod tests {
     fn decode_row_appends_env_override_and_skips_blocked() {
         use aionui_db::AgentMetadataRow;
         let row = AgentMetadataRow {
+            additional_args: None,
             id: "test-agent-2".to_string(),
             user_id: None,
             icon: None,

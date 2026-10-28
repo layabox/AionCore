@@ -1848,7 +1848,12 @@ pub async fn build_antigravity_instance(
         cli_program: None,
         // agy is layer 2, so this carries only the allow-list entries (one
         // `--add-dir` per enabled skill) and never a plugin flag.
-        extra_args: skill_delivery.plan.extra_args.clone(),
+        extra_args: metadata
+            .additional_args
+            .iter()
+            .chain(&skill_delivery.plan.extra_args)
+            .cloned()
+            .collect(),
         ..Default::default()
     };
     session_config.spawn_env = assemble_spawn_env(&metadata.env, runtime_env);
@@ -1998,7 +2003,12 @@ pub async fn build_session_instance(
         // row rather than a code change. claude's builder positions its own init
         // flags first and appends these after, with no de-duplication, so the
         // repeated `--add-dir` survives intact (probe-verified).
-        extra_args: skill_delivery.plan.extra_args.clone(),
+        extra_args: metadata
+            .additional_args
+            .iter()
+            .chain(&skill_delivery.plan.extra_args)
+            .cloned()
+            .collect(),
         ..Default::default()
     };
 
@@ -5032,6 +5042,7 @@ mod build_mapping_tests {
         use aionui_api_types::{AgentHandshake, AgentMetadata, AgentSource, AgentSourceInfo, BehaviorPolicy};
         use aionui_common::AgentType;
         AgentMetadata {
+            additional_args: Vec::new(),
             id: "test".into(),
             icon: None,
             name: "Test".into(),

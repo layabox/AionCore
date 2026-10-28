@@ -263,6 +263,7 @@ mod tests {
 
     fn agent_metadata_row(backend: &str, yolo_id: Option<&str>) -> AgentMetadataRow {
         AgentMetadataRow {
+            additional_args: None,
             id: format!("agent-{backend}"),
             user_id: None,
             icon: None,

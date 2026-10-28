@@ -37,7 +37,7 @@ const AGENT_METADATA_SAFE_COLUMNS: &str = "\
     am.sort_order, \
     am.last_check_status, am.last_check_kind, am.last_check_error_code, am.last_check_error_message, \
     am.last_check_guidance, am.last_check_latency_ms, am.last_check_at, am.last_success_at, am.last_failure_at, \
-    am.command_override, am.env_override, \
+    am.command_override, am.env_override, am.additional_args, \
     am.created_at, am.updated_at";
 
 /// FROM clause for the catalog. No per-user join — every field is machine-level.
@@ -105,6 +105,7 @@ struct AgentMetadataSafeRow {
     last_failure_at: Option<aionui_common::TimestampMs>,
     command_override: Option<String>,
     env_override: Option<String>,
+    additional_args: Option<String>,
     created_at: aionui_common::TimestampMs,
     updated_at: aionui_common::TimestampMs,
 }
@@ -149,6 +150,7 @@ impl AgentMetadataSafeRow {
             last_failure_at: row.try_get("last_failure_at")?,
             command_override: row.try_get("command_override")?,
             env_override: row.try_get("env_override")?,
+            additional_args: row.try_get("additional_args")?,
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
         })
@@ -189,6 +191,7 @@ impl AgentMetadataSafeRow {
 
         (
             AgentMetadataRow {
+                additional_args: self.additional_args,
                 id: self.id,
                 user_id: self.user_id,
                 icon: self.icon,
@@ -630,6 +633,25 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
     ) -> Result<(), DbError> {
         // Machine-level: the acting user does not change which binary runs.
         self.update_agent_overrides(id, command_override, env_override).await
+    }
+
+    async fn set_agent_launch_arguments_for_user(
+        &self,
+        user_id: &str,
+        id: &str,
+        additional_args: &str,
+    ) -> Result<bool, DbError> {
+        let result = sqlx::query(
+            "UPDATE agent_metadata SET additional_args = ?, updated_at = ? WHERE agent_id = ? AND (user_id IS NULL OR user_id = ?)",
+        )
+        .bind(additional_args)
+        .bind(now_ms())
+        .bind(id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .map_err(DbError::Query)?;
+        Ok(result.rows_affected() > 0)
     }
 
     async fn set_enabled(&self, id: &str, enabled: bool) -> Result<bool, DbError> {
@@ -1352,5 +1374,38 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(global_override.as_deref(), Some("/tmp/claude"));
+    }
+
+    #[tokio::test]
+    async fn launch_arguments_survive_upsert_and_enforce_custom_visibility() {
+        let (repo, _db) = setup().await;
+        let params = custom_params("launch-owned", "launch-owned");
+        repo.upsert_for_user("owner", &params).await.unwrap();
+        assert!(
+            !repo
+                .set_agent_launch_arguments_for_user("other", "launch-owned", r#"["--foreign"]"#)
+                .await
+                .unwrap()
+        );
+        assert!(
+            repo.set_agent_launch_arguments_for_user("owner", "launch-owned", r#"["--one","path with spaces",""]"#)
+                .await
+                .unwrap()
+        );
+        repo.update_agent_overrides("launch-owned", Some("/new/tool"), None)
+            .await
+            .unwrap();
+        repo.upsert_for_user("owner", &params).await.unwrap();
+        let row = repo.get_for_user("owner", "launch-owned").await.unwrap().unwrap();
+        assert_eq!(
+            row.additional_args.as_deref(),
+            Some(r#"["--one","path with spaces",""]"#)
+        );
+        assert!(
+            !repo
+                .set_agent_launch_arguments_for_user("owner", "missing", "[]")
+                .await
+                .unwrap()
+        );
     }
 }
