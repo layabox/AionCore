@@ -1380,30 +1380,30 @@ mod tests {
     async fn launch_arguments_survive_upsert_and_enforce_custom_visibility() {
         let (repo, _db) = setup().await;
         let params = custom_params("launch-owned", "launch-owned");
-        repo.upsert_for_user("owner", &params).await.unwrap();
+        repo.upsert_for_user(USER_A, &params).await.unwrap();
         assert!(
             !repo
-                .set_agent_launch_arguments_for_user("other", "launch-owned", r#"["--foreign"]"#)
+                .set_agent_launch_arguments_for_user(USER_B, "launch-owned", r#"["--foreign"]"#)
                 .await
                 .unwrap()
         );
         assert!(
-            repo.set_agent_launch_arguments_for_user("owner", "launch-owned", r#"["--one","path with spaces",""]"#)
+            repo.set_agent_launch_arguments_for_user(USER_A, "launch-owned", r#"["--one","path with spaces",""]"#)
                 .await
                 .unwrap()
         );
         repo.update_agent_overrides("launch-owned", Some("/new/tool"), None)
             .await
             .unwrap();
-        repo.upsert_for_user("owner", &params).await.unwrap();
-        let row = repo.get_for_user("owner", "launch-owned").await.unwrap().unwrap();
+        repo.upsert_for_user(USER_A, &params).await.unwrap();
+        let row = repo.get_for_user(USER_A, "launch-owned").await.unwrap().unwrap();
         assert_eq!(
             row.additional_args.as_deref(),
             Some(r#"["--one","path with spaces",""]"#)
         );
         assert!(
             !repo
-                .set_agent_launch_arguments_for_user("owner", "missing", "[]")
+                .set_agent_launch_arguments_for_user(USER_A, "missing", "[]")
                 .await
                 .unwrap()
         );

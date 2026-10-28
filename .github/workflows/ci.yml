@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, codex/agent-launch-arguments]
+    branches: [main, codex/agent-launch-arguments, codex/agent-launch-arguments-verification]
   pull_request:
     branches: [main]
 
@@ -58,6 +58,10 @@ jobs:
         with:
           prefix-key: v1-rust
       - uses: taiki-e/install-action@nextest
+      - name: Check launch argument persistence and isolation
+        run: cargo test -p aionui-db --lib launch_arguments --locked
+      - name: Check launch argument API security and roundtrip
+        run: cargo test -p aionui-app --test agent_integration_e2e launch_arguments --locked
       - run: cargo nextest run --workspace
 
   changes:
