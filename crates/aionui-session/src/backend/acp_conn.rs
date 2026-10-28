@@ -286,6 +286,7 @@ pub fn acp_capabilities() -> Capabilities {
         current_model: None,
         current_mode: None,
         current_effort: None,
+        service_tier: None,
         auth_methods: Vec::new(),
         // 009 R2: ACP is one session/prompt at a time — no proactive next-turn
         // input path from the conv layer. can_queue degrades to false (= can_send).

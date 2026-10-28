@@ -1684,8 +1684,8 @@ async fn live_codex_ws_http_parity() {
 /// AskUserQuestion end to end: the agent raises a structured question, the user
 /// answers it through the REST endpoint, and the turn carries on to a clean
 /// finish. claude is the only backend that supports `AnswerAsk` — codex rejects
-/// it (`answer_ask`), agy has no arm at all — so this is deliberately
-/// claude-only rather than a generic helper.
+/// it (`answer_ask`), agy has no arm at all. Native Codex coverage follows below;
+/// this fixture specifically retains the Claude wire contract.
 ///
 /// The feature had no live coverage at all, which meant the whole path
 /// (`ask` frame → `POST /asks/{id}/answer` → the CLI's control response → the
@@ -1796,6 +1796,252 @@ async fn live_claude_ask_user_question_round_trip() {
     );
 
     record_frame_types("claude-ask", &frames.lock().unwrap().clone());
+}
+
+/// Verified against the 0.164.0-alpha.11.1 native async capture. The first
+/// turn finishes while the question remains recoverable; an answer opens a
+/// normal tracked user turn and receives a real agent reply.
+#[tokio::test]
+#[ignore = "spawns the real Codex CLI with async questions; needs credentials"]
+async fn live_codex_async_question_round_trip() {
+    run_codex_async_question(true).await;
+}
+
+#[tokio::test]
+#[ignore = "spawns the real Codex CLI with async questions; needs credentials"]
+async fn live_codex_async_question_midturn_round_trip() {
+    run_codex_async_question(false).await;
+}
+
+async fn run_codex_async_question(answer_after_finish: bool) {
+    let app = start_live_app().await;
+    let workspace = tempfile::tempdir().unwrap();
+    let created = http_json(
+        &app,
+        "POST",
+        "/api/conversations",
+        json!({"type":"acp","extra":{"workspace":workspace.path().to_string_lossy(),"backend":"codex"}}),
+    )
+    .await;
+    let id = created["data"]["id"].as_str().unwrap().to_owned();
+    let frames = connect_ws_recorder(app.addr, &app.token).await;
+    let continuation = if answer_after_finish {
+        "Do not use other tools. Finish this turn with Waiting for test answer."
+    } else {
+        "Immediately after asking, run only the shell command sleep 5 to leave time for the user to answer during this turn. Do not modify any files."
+    };
+    let sent = http_json(&app, "POST", &format!("/api/conversations/{id}/messages"), json!({"content":format!("Synthetic UI test only. Call request_user_input_async exactly once to ask one question titled Choose a test layout with options Compact and Spacious. Do not ask in prose. {continuation} When I answer, repeat the selected label and finish.")})).await;
+    assert!(sent["data"]["turn_id"].is_string(), "{sent}");
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let ask = loop {
+        let snapshot = frames.lock().unwrap().clone();
+        let stream = stream_frames_for(&snapshot, &id);
+        if !answer_after_finish || stream.iter().any(|frame| frame["data"]["type"] == "finish") {
+            if let Some(frame) = stream.iter().find(|frame| frame["data"]["type"] == "ask") {
+                break frame["data"]["data"].clone();
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "missing async question or first turn completion"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let token = ask["request_id"].as_str().unwrap();
+    let recovered = http_json(
+        &app,
+        "GET",
+        &format!("/api/conversations/{id}/confirmations"),
+        Value::Null,
+    )
+    .await;
+    assert!(
+        recovered["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|q| q["call_id"] == token && q["questions"][0]["options"][1]["label"] == "Spacious")
+    );
+    let answered = http_json(
+        &app,
+        "POST",
+        &format!("/api/conversations/{id}/asks/{token}/answer"),
+        json!({"answers":[{"question":ask["questions"][0]["question"],"labels":["Spacious"]}]}),
+    )
+    .await;
+    assert_eq!(answered["success"], true, "{answered}");
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        let snapshot = frames.lock().unwrap().clone();
+        let stream = stream_frames_for(&snapshot, &id);
+        let reply = stream
+            .iter()
+            .filter(|f| matches!(f["data"]["type"].as_str(), Some("text" | "content")))
+            .map(|f| f["data"]["data"]["content"].as_str().unwrap_or(""))
+            .collect::<String>();
+        let ends_in_finish = stream
+            .iter()
+            .rev()
+            .find(|f| matches!(f["data"]["type"].as_str(), Some("text" | "content" | "finish")))
+            .is_some_and(|f| f["data"]["type"] == "finish");
+        if ends_in_finish
+            && reply.contains("Spacious")
+            && stream.iter().filter(|f| f["data"]["type"] == "finish").count()
+                >= if answer_after_finish { 2 } else { 1 }
+        {
+            assert!(reply.contains("Spacious"), "answer must reach Codex: {reply}");
+            assert!(
+                stream
+                    .iter()
+                    .any(|f| f["data"]["type"] == "ask_resolved" && f["data"]["data"]["request_id"] == token)
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "async answer did not produce a tracked completed reply"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let snapshot = frames.lock().unwrap().clone();
+    let answer_messages = snapshot
+        .iter()
+        .filter(|frame| {
+            frame["name"] == "message.userCreated"
+                && frame["data"]["conversation_id"] == id
+                && frame["data"]["content"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("Answers to the agent's questions:"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        answer_messages.len(),
+        1,
+        "one user answer must be persisted and broadcast"
+    );
+    assert_eq!(
+        answer_messages[0]["data"]["client_msg_id"].is_string(),
+        !answer_after_finish,
+        "the running-turn case must actually use correlated mid-turn delivery"
+    );
+    let recovered = http_json(
+        &app,
+        "GET",
+        &format!("/api/conversations/{id}/confirmations"),
+        Value::Null,
+    )
+    .await;
+    assert!(recovered["data"].as_array().unwrap().is_empty());
+    app.shutdown(&[&id]).await;
+    println!("[codex-async-ask] question, completion, recovery, ordinary-message answer and reply passed");
+}
+
+/// Real native Codex default-mode question -> shared Ask -> recovery HTTP ->
+/// dedicated answer route -> native response -> resolved stream and completion.
+/// The subprocess-only feature switch is verified by the captured default-mode
+/// frames under docs/protocol-schemas/codex-0.161.0/.
+#[tokio::test]
+#[ignore = "spawns the real codex CLI; needs credentials"]
+async fn live_codex_request_user_input_round_trip() {
+    let app = start_live_app().await;
+    let workspace = tempfile::tempdir().unwrap();
+    let created = http_json(
+        &app,
+        "POST",
+        "/api/conversations",
+        json!({
+            "type": "acp", "extra": { "workspace": workspace.path().to_string_lossy(), "backend": "codex" }
+        }),
+    )
+    .await;
+    let conversation_id = created["data"]["id"].as_str().expect("created conversation").to_owned();
+    let frames = connect_ws_recorder(app.addr, &app.token).await;
+    let sent = http_json(&app, "POST", &format!("/api/conversations/{conversation_id}/messages"), json!({
+        "content": "Protocol verification only. Call request_user_input now with exactly two questions. Ask \"Where should growth systems go?\" with options Activity and UI, and \"Which layout?\" with options Compact and Spacious. Do not use shell, files or other tools. Wait for my answers, then reply with exactly the two chosen labels."
+    })).await;
+    assert!(sent["data"]["turn_id"].is_string(), "send failed: {sent}");
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let ask = loop {
+        let snapshot = frames.lock().unwrap().clone();
+        if let Some(frame) = stream_frames_for(&snapshot, &conversation_id)
+            .into_iter()
+            .find(|f| f["data"]["type"] == "ask")
+        {
+            break frame["data"]["data"].clone();
+        }
+        assert!(Instant::now() < deadline, "Codex did not send a native question");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let request_id = ask["request_id"].as_str().unwrap();
+    let questions = ask["questions"].as_array().unwrap();
+    assert_eq!(questions.len(), 2, "the complete native question set must reach the UI");
+    let recovered = http_json(
+        &app,
+        "GET",
+        &format!("/api/conversations/{conversation_id}/confirmations"),
+        Value::Null,
+    )
+    .await;
+    let pending = recovered["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["call_id"] == request_id)
+        .expect("recover pending question");
+    assert_eq!(pending["questions"].as_array().unwrap().len(), 2);
+    let answers = questions
+        .iter()
+        .map(|q| json!({ "question": q["question"], "labels": [q["options"][0]["label"]] }))
+        .collect::<Vec<_>>();
+    let answered = http_json(
+        &app,
+        "POST",
+        &format!("/api/conversations/{conversation_id}/asks/{request_id}/answer"),
+        json!({ "answers": answers }),
+    )
+    .await;
+    assert_eq!(
+        answered["success"], true,
+        "native response must be flushed before success"
+    );
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let mut reply = String::new();
+    loop {
+        let snapshot = frames.lock().unwrap().clone();
+        let stream = stream_frames_for(&snapshot, &conversation_id);
+        reply.clear();
+        for frame in &stream {
+            if matches!(frame["data"]["type"].as_str(), Some("text" | "content")) {
+                reply.push_str(frame["data"]["data"]["content"].as_str().unwrap_or(""));
+            }
+        }
+        if stream.iter().any(|f| f["data"]["type"] == "finish") {
+            assert!(
+                stream
+                    .iter()
+                    .any(|f| f["data"]["type"] == "ask_resolved" && f["data"]["data"]["request_id"] == request_id)
+            );
+            break;
+        }
+        assert!(Instant::now() < deadline, "Codex did not finish after answering");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    for question in questions {
+        assert!(
+            reply.contains(question["options"][0]["label"].as_str().unwrap()),
+            "Codex must receive every chosen label"
+        );
+    }
+    let recovered = http_json(
+        &app,
+        "GET",
+        &format!("/api/conversations/{conversation_id}/confirmations"),
+        Value::Null,
+    )
+    .await;
+    assert!(recovered["data"].as_array().unwrap().is_empty());
+    app.shutdown(&[&conversation_id]).await;
+    println!("[codex-ask] native two-question WS/HTTP/answer/resolved/completion round-trip passed");
 }
 
 // The plan card (codex only) and the tool card (all three).

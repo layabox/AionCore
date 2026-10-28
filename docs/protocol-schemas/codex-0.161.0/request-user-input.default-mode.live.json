@@ -1,0 +1,47 @@
+{
+  "method": "item/tool/requestUserInput",
+  "id": 0,
+  "params": {
+    "threadId": "01a17d25-fa87-78b1-bb88-28838804793b",
+    "turnId": "01a17d25-fb60-7350-9aed-9fad0d44e3dd",
+    "itemId": "call_fefbda7c6c6846cf82cff76df78e2ac1",
+    "questions": [
+      {
+        "id": "growth_systems",
+        "header": "Placement",
+        "question": "Where should the growth systems go?",
+        "isOther": true,
+        "isSecret": false,
+        "options": [
+          {
+            "label": "Activity",
+            "description": "Place the growth systems in Activity."
+          },
+          {
+            "label": "UI",
+            "description": "Place the growth systems in UI."
+          }
+        ]
+      },
+      {
+        "id": "layout",
+        "header": "Layout",
+        "question": "Which layout?",
+        "isOther": true,
+        "isSecret": false,
+        "options": [
+          {
+            "label": "Compact",
+            "description": "Use a compact layout."
+          },
+          {
+            "label": "Spacious",
+            "description": "Use a spacious layout."
+          }
+        ]
+      }
+    ],
+    "isBlocking": false,
+    "autoResolutionMs": null
+  }
+}

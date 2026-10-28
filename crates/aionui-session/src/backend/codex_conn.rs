@@ -30,6 +30,7 @@ use aionui_process::Spawner;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, broadcast};
 
+use super::codex_questions::{CodexQuestionRequest, PendingCodexRequest, PendingCodexRequests};
 #[cfg(any(test, feature = "test-support"))]
 use super::codex_title::NoTitleIo;
 use super::codex_title::{SpawnedTitleIo, TitleGen};
@@ -47,6 +48,9 @@ use futures_util::stream::{BoxStream, StreamExt};
 const CODEX_CONFIG_FLAG: &str = "-c";
 const CODEX_ENV_POLICY_INHERIT_ALL: &str = "shell_environment_policy.inherit=all";
 const CODEX_ENV_POLICY_CLEAR_INCLUDE_ONLY: &str = "shell_environment_policy.include_only=[]";
+// Verified: codex-cli 0.161.0 `features list` names this switch; the checked-in
+// default-mode live capture proves it exposes request_user_input outside Plan.
+const CODEX_DEFAULT_MODE_QUESTIONS: &str = "features.default_mode_request_user_input=true";
 
 /// Config overrides that make Codex command-execution children inherit the
 /// runtime environment injected into the app-server process.
@@ -68,6 +72,7 @@ fn codex_app_server_args(extra_args: &[String]) -> Vec<String> {
     // Append the compatibility policy after user/configured extras, matching
     // the former ACP launch policy and making these final overrides authoritative.
     args.extend(codex_shell_environment_policy_args().map(str::to_owned));
+    args.extend([CODEX_CONFIG_FLAG.to_owned(), CODEX_DEFAULT_MODE_QUESTIONS.to_owned()]);
     args
 }
 
@@ -721,6 +726,7 @@ pub fn codex_capabilities() -> Capabilities {
         current_model: None,
         current_mode: None,
         current_effort: None,
+        service_tier: None,
         auth_methods: vec!["chatgptAuthTokens".into(), "refresh".into()],
         // B5 (mid-turn interjection Task 4): the conversation layer now routes a
         // mid-turn send to Command::Steer (turn/steer soft injection), so a
@@ -859,17 +865,18 @@ pub struct CodexSessionBackend {
     /// until known → SetMode rejects (can't build a valid collaborationMode).
     current_model: Arc<Mutex<Option<String>>>,
     /// REST-recovery (`GET /confirmations`) source: the currently-open (unanswered)
-    /// tool/file/elicitation approval requests, keyed by the SAME request_id the
-    /// backend surfaced on `SessionEvent::Permission` (so the recovered card's
-    /// id==call_id matches the live frame and de-dups). The value is a safe title
-    /// label derived from the reverse-RPC method (NOT the command body — TIO-13).
+    /// tool/file/elicitation approvals and native questions, keyed by the SAME request_id the
+    /// backend surfaced on `Permission` or `Ask` (so recovery and live de-dup).
+    /// Approvals store a safe class title; questions retain normalized card data
+    /// and private native IDs. Raw command bodies are never stored here (TIO-13).
     /// Lifecycle: the reader inserts on each `*/requestApproval` (+ elicitation)
     /// reverse-RPC, removes on `serverRequest/resolved` (codex retracted/answered it)
     /// and `dispatch(AnswerPermission)` (we answered it). `std::sync::Mutex` because
     /// the sync `pending_permission_requests()` trait method reads it without await —
     /// mirrors claude's `pending_perms`. Behind an Arc so the reader (cloned into
     /// every post-wake reader via `reader_state`) shares the one registry.
-    pending_tool_approvals: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    pending_tool_approvals: PendingCodexRequests,
+    question_answer_gate: Mutex<()>,
     /// GAP-A: rpc-id → [`PendingSend`] correlation for in-flight `turn/start`
     /// (and review/compact/logout) requests. codex IS a bidirectional JSON-RPC
     /// client: `turn/start` gets a synchronous response
@@ -963,6 +970,7 @@ enum DiscoveryKind {
 /// Per-session handshake-discovered capability lists (B-CODEX-MODEL-LIST).
 #[derive(Default, Clone)]
 struct Discovered {
+    service_tier: super::codex_service_tier::State,
     models: Vec<crate::capability::ModelInfo>,
     /// For codex this holds the fixed permission-tier mode enum mapped from
     /// `permissionProfile/list` (feature 012), NOT collaborationMode.
@@ -1000,7 +1008,7 @@ struct CodexReaderState {
     thread_binding: Arc<Mutex<Option<String>>>,
     active_turn_id: Arc<Mutex<Option<String>>>,
     pending_auth_id: Arc<Mutex<Option<Value>>>,
-    pending_tool_approvals: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    pending_tool_approvals: PendingCodexRequests,
     pending_sends: Arc<Mutex<HashMap<u64, PendingSend>>>,
     pending_discovery: Arc<Mutex<HashMap<u64, DiscoveryKind>>>,
     pending_set: Arc<Mutex<HashMap<u64, String>>>,
@@ -1296,6 +1304,7 @@ impl CodexSessionBackend {
         ));
         let idle_timer = {
             let tif = turn_in_flight.clone();
+            let pending_questions = pending_tool_approvals.clone();
             // 009 R6 cleanup path 3: emit BackendSuspended on idle-reap → orchestrator
             // clears the workflow_roster (a running workflow's task_notification will
             // never arrive once the process is reaped).
@@ -1306,7 +1315,14 @@ impl CodexSessionBackend {
                 &suspend,
                 idle_check_interval_ms(idle_ttl_ms),
                 aionui_common::now_ms,
-                move || tif.load(std::sync::atomic::Ordering::SeqCst),
+                move || {
+                    tif.load(std::sync::atomic::Ordering::SeqCst)
+                        || pending_questions
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .values()
+                            .any(|request| matches!(request, PendingCodexRequest::Question(_)))
+                },
                 move || {
                     let _ = etx.send(SessionEnvelope {
                         session_id: sid.clone(),
@@ -1333,6 +1349,7 @@ impl CodexSessionBackend {
             active_turn_id,
             pending_auth_id,
             pending_tool_approvals,
+            question_answer_gate: Mutex::new(()),
             current_model,
             pending_sends,
             pending_discovery,
@@ -1421,6 +1438,11 @@ impl CodexSessionBackend {
         // A handshake is a fresh chance: any prior resume rejection belonged to
         // the previous process/attempt.
         *self.resume_poison.lock().await = None;
+        self.discovered
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .service_tier
+            .begin_handshake();
         self.write_frame(initialize_params().into_frame(self.next_rpc_id(), "initialize"))
             .await?;
 
@@ -1588,7 +1610,7 @@ async fn reader_task(
     thread_binding: Arc<Mutex<Option<String>>>,
     active_turn_id: Arc<Mutex<Option<String>>>,
     pending_auth_id: Arc<Mutex<Option<Value>>>,
-    pending_tool_approvals: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    pending_tool_approvals: PendingCodexRequests,
     pending_sends: Arc<Mutex<HashMap<u64, PendingSend>>>,
     pending_discovery: Arc<Mutex<HashMap<u64, DiscoveryKind>>>,
     pending_set: Arc<Mutex<HashMap<u64, String>>>,
@@ -1654,6 +1676,7 @@ async fn reader_task(
                         // Grace expired: no rich follow-up arrived after systemError
                         // (never observed live — defensive bound). Fall back to the
                         // opaque terminal so the FSM leaves Running.
+                        resolve_codex_questions(&pending_tool_approvals, &event_tx, &session_id, false);
                         terminated = true;
                         system_error_pending = false;
                         system_error_deadline = None;
@@ -1724,6 +1747,59 @@ async fn reader_task(
                         // server notification → SessionEvent(s)
                         let cur = turn_gen.load(Ordering::SeqCst);
                         let params = frame.get("params").unwrap_or(&Value::Null);
+                        if matches!(m, "item/started" | "item/completed") {
+                            let item = params.get("item").unwrap_or(&Value::Null);
+                            let async_question = CodexQuestionRequest::parse_async_item(item, cur);
+                            if item.get("delivery").and_then(Value::as_str) == Some("async")
+                                && item.get("questions").is_some_and(|questions| !questions.is_null())
+                                && async_question.is_err()
+                            {
+                                tracing::warn!(conversation_id = %session_id, "invalid Codex async question; preserving prose fallback");
+                            }
+                            if let Ok(request) = async_question {
+                                let mut pending = pending_tool_approvals.lock().unwrap_or_else(|e| e.into_inner());
+                                // started/completed repeat the same native item. Keep
+                                // answered tombstones too: a late completed must not
+                                // resurrect a card already answered from started.
+                                if !pending
+                                    .values()
+                                    .any(|entry| entry.question_wire_id() == Some(&request.wire_id))
+                                {
+                                    let request_id = format!("codex-question:{}", uuid::Uuid::new_v4());
+                                    let questions = request.card();
+                                    pending.insert(request_id.clone(), PendingCodexRequest::Question(request));
+                                    emit(
+                                        &event_tx,
+                                        &session_id,
+                                        cur,
+                                        SessionEvent::Ask {
+                                            request_id: request_id.clone(),
+                                            questions,
+                                        },
+                                    );
+                                    tracing::info!(conversation_id = %session_id, %request_id, asynchronous = true, "Codex native question received");
+                                }
+                            }
+                        }
+                        if m == "thread/settings/updated" {
+                            let snapshot = {
+                                let mut disc = discovered.lock().unwrap_or_else(|e| e.into_inner());
+                                disc.service_tier
+                                    .observe(params.get("threadSettings").unwrap_or(&Value::Null));
+                                disc.service_tier.snapshot()
+                            };
+                            if let Some(snapshot) = snapshot {
+                                emit(
+                                    &event_tx,
+                                    &session_id,
+                                    cur,
+                                    SessionEvent::AdapterSpecific {
+                                        tag: "service_tier".into(),
+                                        payload: serde_json::to_value(snapshot).unwrap_or(Value::Null),
+                                    },
+                                );
+                            }
+                        }
                         if m == "thread/started" {
                             // bind threadId (backend transport key, kept private).
                             if let Some(tid) = params.get("thread").and_then(|t| t.get("id")).and_then(Value::as_str) {
@@ -1777,6 +1853,7 @@ async fn reader_task(
                                 &mut idle_pending,
                                 &mut system_error_pending,
                             ) {
+                                resolve_codex_questions(&pending_tool_approvals, &event_tx, &session_id, false);
                                 // Turn ended → clear the active turn id (a stale token
                                 // would make a later steer/interrupt target a dead turn).
                                 *active_turn_id.lock().await = None;
@@ -1822,7 +1899,41 @@ async fn reader_task(
                             if matches!(kind, crate::event::PermissionKind::Auth) {
                                 *pending_auth_id.lock().await = None;
                             }
-                            let resolved_id = req_id.map(|v| v.to_string()).unwrap_or_default();
+                            let resolved_id = req_id.as_ref().map(Value::to_string).unwrap_or_default();
+                            let resolved_question = {
+                                let mut pending = pending_tool_approvals.lock().unwrap_or_else(|e| e.into_inner());
+                                let key = pending.iter().find_map(|(key, request)| {
+                                    request
+                                        .question_wire_id()
+                                        .filter(|wire_id| Some(*wire_id) == req_id.as_ref())
+                                        .map(|_| key.clone())
+                                });
+                                key.and_then(|key| match pending.get(&key).cloned() {
+                                    Some(PendingCodexRequest::Question(request)) => {
+                                        pending.insert(
+                                            key.clone(),
+                                            PendingCodexRequest::AnsweredQuestion {
+                                                wire_id: request.wire_id.clone(),
+                                            },
+                                        );
+                                        Some((key, Some(request.turn_gen)))
+                                    }
+                                    Some(PendingCodexRequest::AnsweredQuestion { .. }) => Some((key, None)),
+                                    _ => None,
+                                })
+                            };
+                            if let Some((request_id, generation)) = resolved_question {
+                                if let Some(generation) = generation {
+                                    tracing::info!(conversation_id = %session_id, %request_id, "Codex native question resolved by server");
+                                    emit(
+                                        &event_tx,
+                                        &session_id,
+                                        generation,
+                                        SessionEvent::AskResolved { request_id },
+                                    );
+                                }
+                                continue;
+                            }
                             // Drop the recovered-card entry: codex resolved this approval
                             // (answered elsewhere or retracted), so it is no longer a
                             // pending confirmation for REST recovery. The registry keys
@@ -1872,6 +1983,7 @@ async fn reader_task(
                                     turn_gen = cur,
                                     "codex error{{willRetry:false}} → synthesizing is_error terminal (no turn/completed guaranteed)"
                                 );
+                                resolve_codex_questions(&pending_tool_approvals, &event_tx, &session_id, false);
                                 emit(&event_tx, &session_id, cur, synth_error_terminal(message));
                             }
                             continue;
@@ -1890,6 +2002,13 @@ async fn reader_task(
                         // ERROR terminates the turn / surfaces a Notice (below) —
                         // never a silent drop. Other responses (settings/rollback/etc)
                         // flow via notifications; diagnostic only.
+                        if let Some(result) = frame.get("result").filter(|r| r.get("thread").is_some()) {
+                            discovered
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .service_tier
+                                .observe(result);
+                        }
                         if let Some(rid) = frame.get("id").and_then(Value::as_u64) {
                             let error_message = frame.get("error").map(|e| {
                                 e.get("message")
@@ -1981,6 +2100,12 @@ async fn reader_task(
                                                 conversation_id = %session_id,
                                                 error = %msg,
                                                 "codex rejected the turn request — synthesizing is_error terminal"
+                                            );
+                                            resolve_codex_questions(
+                                                &pending_tool_approvals,
+                                                &event_tx,
+                                                &session_id,
+                                                false,
                                             );
                                             emit(
                                                 &event_tx,
@@ -2074,6 +2199,24 @@ async fn reader_task(
                                                 slash_commands: builtin_slash_commands(),
                                             },
                                         );
+                                        // Settings can precede model/list. Re-project speed
+                                        // after discovery even if no later settings notice arrives.
+                                        let speed = discovered
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner())
+                                            .service_tier
+                                            .snapshot();
+                                        if let Some(snapshot) = speed {
+                                            emit(
+                                                &event_tx,
+                                                &session_id,
+                                                turn_gen.load(Ordering::SeqCst),
+                                                SessionEvent::AdapterSpecific {
+                                                    tag: "service_tier".into(),
+                                                    payload: serde_json::to_value(snapshot).unwrap_or(Value::Null),
+                                                },
+                                            );
+                                        }
                                     }
                                     DiscoveryKind::Checkpoints => {
                                         emit(
@@ -2129,7 +2272,7 @@ async fn reader_task(
                                 tracing::error!(
                                     conversation_id = %session_id,
                                     set = %label,
-                                    "codex thread/settings/update (SetMode/SetModel/effort) rejected by agent: {message}"
+                                    "codex thread/settings/update rejected by agent: {message}"
                                 );
                                 emit(
                                     &event_tx,
@@ -2154,6 +2297,8 @@ async fn reader_task(
             Err(_) => break,
         }
     }
+
+    resolve_codex_questions(&pending_tool_approvals, &event_tx, &session_id, true);
 
     // F-4: the reader loop ended (process exited / stdout EOF) → the turn (if any)
     // is terminal. Clear the turn-active flag so the idle timer is unblocked.
@@ -2402,6 +2547,11 @@ fn fill_discovery(kind: DiscoveryKind, result: &Value, discovered: &Arc<std::syn
     };
     match kind {
         DiscoveryKind::Models => {
+            discovered
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .service_tier
+                .discover(result);
             let arr = list("data", "models");
             let present = arr.is_some();
             let models = arr
@@ -2557,12 +2707,58 @@ fn rollback_to_turn(result: &Value) -> u64 {
         .unwrap_or(0)
 }
 
+/// A turn terminal retires blocking questions; process exit retires all questions.
+/// Retain tombstones until server resolution so late notifications do not touch
+/// unrelated permission counters. Recovery never returns these retired entries.
+fn resolve_codex_questions(
+    pending: &PendingCodexRequests,
+    event_tx: &broadcast::Sender<SessionEnvelope>,
+    session_id: &str,
+    process_exited: bool,
+) {
+    let resolved = {
+        let mut pending = pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending
+            .iter_mut()
+            .filter_map(|(id, entry)| {
+                if let PendingCodexRequest::Question(request) = entry {
+                    if !process_exited && !request.blocking {
+                        return None;
+                    }
+                    let generation = request.turn_gen;
+                    *entry = PendingCodexRequest::AnsweredQuestion {
+                        wire_id: request.wire_id.clone(),
+                    };
+                    Some((id.clone(), generation))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    if process_exited {
+        // RPC IDs belong to this process: a wake may reuse them from zero.
+        pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, entry| matches!(entry, PendingCodexRequest::Approval(_)));
+    }
+    for (request_id, generation) in resolved {
+        emit(
+            event_tx,
+            session_id,
+            generation,
+            SessionEvent::AskResolved { request_id },
+        );
+    }
+}
+
 /// Remove a resolved/answered approval from the recovery registry. `serverRequest/
 /// resolved` carries the RAW wire id, but an elicitation was stored under the
 /// `ELICIT_PREFIX`-tagged key — so try the raw id first, then the prefixed form, so
 /// a resolved notification clears either entry shape. `dispatch(AnswerPermission)`
 /// passes the exact stored key (raw or prefixed), which the first lookup catches.
-fn remove_pending_tool_approval(pending: &Arc<std::sync::Mutex<HashMap<String, String>>>, request_id: &str) {
+fn remove_pending_tool_approval(pending: &PendingCodexRequests, request_id: &str) {
     let mut map = pending.lock().unwrap_or_else(|e| e.into_inner());
     if map.remove(request_id).is_none() {
         map.remove(&format!("{ELICIT_PREFIX}{request_id}"));
@@ -2588,7 +2784,7 @@ async fn handle_reverse_rpc(
     turn_gen: &Arc<AtomicU64>,
     event_tx: &broadcast::Sender<SessionEnvelope>,
     pending_auth_id: &Arc<Mutex<Option<Value>>>,
-    pending_tool_approvals: &Arc<std::sync::Mutex<HashMap<String, String>>>,
+    pending_tool_approvals: &PendingCodexRequests,
     stdin: &Arc<Mutex<Option<aionui_process::BoxedStdin>>>,
 ) {
     let cur = turn_gen.load(Ordering::SeqCst);
@@ -2662,7 +2858,7 @@ async fn handle_reverse_rpc(
             pending_tool_approvals
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .insert(request_id.clone(), title.to_string());
+                .insert(request_id.clone(), PendingCodexRequest::Approval(title.to_string()));
             emit(
                 event_tx,
                 session_id,
@@ -2708,10 +2904,10 @@ async fn handle_reverse_rpc(
             // Register for REST recovery, keyed by the ELICIT_PREFIX-tagged request_id
             // (the same id we surface + dispatch(AnswerPermission) answers). Title is
             // the safe approval class, not the elicitation message body (TIO-13).
-            pending_tool_approvals
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(request_id.clone(), "Elicitation".to_string());
+            pending_tool_approvals.lock().unwrap_or_else(|e| e.into_inner()).insert(
+                request_id.clone(),
+                PendingCodexRequest::Approval("Elicitation".to_string()),
+            );
             emit(
                 event_tx,
                 session_id,
@@ -2725,22 +2921,51 @@ async fn handle_reverse_rpc(
                 },
             );
         }
+        "item/tool/requestUserInput" => {
+            // A native process may reuse RPC IDs after restart. The public request
+            // token must not let an old card answer a new request with that same ID.
+            let request_id = format!("codex-question:{}", uuid::Uuid::new_v4());
+            match CodexQuestionRequest::parse(id.clone(), frame.get("params").cloned().unwrap_or(Value::Null), cur) {
+                Ok(request) => {
+                    let questions = request.card();
+                    let inserted = {
+                        let mut pending = pending_tool_approvals.lock().unwrap_or_else(|e| e.into_inner());
+                        if pending.values().any(
+                            |entry| matches!(entry, PendingCodexRequest::Question(existing) if existing.wire_id == id),
+                        ) {
+                            false
+                        } else {
+                            pending.retain(|_, entry| !matches!(entry, PendingCodexRequest::AnsweredQuestion { wire_id } if wire_id == &id));
+                            pending.insert(request_id.clone(), PendingCodexRequest::Question(request));
+                            // Publish while registration is locked: REST polling cannot
+                            // answer the request before its Ask event was emitted.
+                            emit(
+                                event_tx,
+                                session_id,
+                                cur,
+                                SessionEvent::Ask {
+                                    request_id: request_id.clone(),
+                                    questions,
+                                },
+                            );
+                            true
+                        }
+                    };
+                    if inserted {
+                        tracing::info!(conversation_id = %session_id, %request_id, "Codex native question received");
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!(conversation_id = %session_id, %request_id, "invalid Codex native question rejected");
+                    write_reverse_error(stdin, &id, -32602, "invalid requestUserInput question payload").await;
+                }
+            }
+        }
         // Any other reverse-RPC → unblock with a -32601 error (never let an unknown
         // blocking request hang the turn) + opaque diagnostic. This matches the
         // ACP-audit finding: an unhandled reverse method should be clean-rejected,
         // not silently dropped (which deadlocks a blocking request).
         //
-        // KNOWN deferred case: `item/tool/requestUserInput` (codex's native
-        // ask-the-user tool, the AskUserQuestion analog) currently falls here and is
-        // rejected, so the user never sees the question and the tool gets the empty
-        // fallback. Wiring it (surface Permission{questions} + answer
-        // {answers:{<id>:{answers}}} via ELICIT_PREFIX, claude AskUserQuestion is the
-        // template) is a reachable FOLLOW-UP — gap-reaudit confirmed the schema is fully
-        // defined. NOT wired yet because we could not capture a LIVE requestUserInput
-        // frame: it is mode-gated (`available_modes`, spec_plan.rs:729) and codex
-        // refused to invoke it in default OR plan mode in this env ("unavailable in the
-        // current mode"). Per the no-parser-for-an-unprobed-shape discipline, deferred
-        // until the trigger/mode is found and a real frame is captured.
         _ => {
             write_reverse_error(stdin, &id, -32601, "method not handled by aionui-session").await;
             emit(
@@ -3191,6 +3416,7 @@ fn map_item(params: &Value, completed: bool) -> Vec<SessionEvent> {
             // compose the same final text under both shapes. Only the started
             // edge — the completed frame repeats the same text (double-emit).
             if !completed
+                && CodexQuestionRequest::parse_async_item(item, 0).is_err()
                 && let Some(text) = item.get("text").and_then(Value::as_str)
                 && !text.is_empty()
             {
@@ -4297,9 +4523,57 @@ impl SessionBackend for CodexSessionBackend {
                     turn_gen: self.turn_gen.load(Ordering::SeqCst),
                 })
             }
-            // codex has no AskUserQuestion (its MCP elicitation degrades to a
-            // Permission with ELICIT_PREFIX); Ask is never raised here.
-            Command::AnswerAsk { .. } => Err(BackendError::CommandNotSupported { command: "answer_ask" }),
+            Command::AnswerAsk { request_id, answers } => {
+                // Serialize replies: a double click must not write two native responses.
+                let _answer_guard = self.question_answer_gate.lock().await;
+                let request = {
+                    let pending = self.pending_tool_approvals.lock().unwrap_or_else(|e| e.into_inner());
+                    match pending.get(&request_id) {
+                        Some(PendingCodexRequest::Question(request)) => request.clone(),
+                        _ => {
+                            return Err(BackendError::Transport(
+                                "no pending Codex question for this request".into(),
+                            ));
+                        }
+                    }
+                };
+                let frame = request.response(answers.as_deref())?;
+                if !request.asynchronous {
+                    self.write_frame(frame).await?;
+                }
+                // Async answers were accepted through the conversation's normal
+                // message service before this local acknowledgement; there is no
+                // reverse-RPC to answer (verified: synthetic async capture).
+                // Keep recovery retryable on write failure; retire only after flush.
+                let resolved_here = {
+                    let mut pending = self.pending_tool_approvals.lock().unwrap_or_else(|e| e.into_inner());
+                    if matches!(pending.get(&request_id), Some(PendingCodexRequest::Question(_))) {
+                        pending.insert(
+                            request_id.clone(),
+                            PendingCodexRequest::AnsweredQuestion {
+                                wire_id: request.wire_id.clone(),
+                            },
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                };
+                tracing::info!(conversation_id = %self.session_id, %request_id, answered = answers.is_some(), asynchronous = request.asynchronous, "Codex question answer acknowledged");
+                if resolved_here {
+                    emit(
+                        &self.event_tx,
+                        &self.session_id,
+                        request.turn_gen,
+                        SessionEvent::AskResolved { request_id },
+                    );
+                }
+                Ok(CommandReceipt {
+                    accepted: true,
+                    admission: Admission::NoTurn,
+                    turn_gen: request.turn_gen,
+                })
+            }
             Command::AnswerAuth { method_id, credentials } => {
                 // Mid-session re-auth (R6/R15): the server raised
                 // `account/chatgptAuthTokens/refresh` (a blocking ServerRequest the
@@ -4415,8 +4689,17 @@ impl SessionBackend for CodexSessionBackend {
                 request_id,
                 decision,
                 selected: _, // codex approval is accept/decline; no pick-one label
-                answers: _,  // codex has no AskUserQuestion; per-question answers N/A
+                answers: _,  // Native questions use the dedicated AnswerAsk command.
             } => {
+                if matches!(
+                    self.pending_tool_approvals
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&request_id),
+                    Some(PendingCodexRequest::Question(_) | PendingCodexRequest::AnsweredQuestion { .. })
+                ) {
+                    return Err(BackendError::Transport("Codex questions require AnswerAsk".into()));
+                }
                 let approved = matches!(
                     decision,
                     super::types::PermissionDecision::Approved | super::types::PermissionDecision::AllowAlways
@@ -4515,6 +4798,89 @@ impl SessionBackend for CodexSessionBackend {
                     turn_gen: self.turn_gen.load(Ordering::SeqCst),
                 })
             }
+            Command::SetConfigOption { option_id, value } if option_id == "service_tier" => {
+                self.suspend
+                    .ensure_awake(aionui_common::now_ms(), || self.wake_handle())
+                    .await?;
+                // Resume pre-seeds a thread id. Wait for its result before trusting it.
+                let deadline = tokio::time::Instant::now() + super::handshake_budget();
+                while self.pending_resume.lock().await.is_some() {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(BackendError::HandshakeTimeout("Codex resume was not confirmed".into()));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                let tid = self.bound_thread().await?;
+                // Wait for the real model catalog. No fabricated tier list for old CLIs.
+                for _ in 0..60 {
+                    if self.capabilities().service_tier.is_some() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                let revision = {
+                    let disc = self.discovered.lock().unwrap_or_else(|e| e.into_inner());
+                    let valid = disc
+                        .service_tier
+                        .snapshot()
+                        .is_some_and(|s| s.options.iter().any(|o| o.value == value));
+                    if !valid {
+                        return Err(BackendError::CommandNotSupported {
+                            command: "service_tier",
+                        });
+                    }
+                    // A thread/resume response is already a real observation. Codex
+                    // need not emit a second notification for an unchanged setting.
+                    if disc
+                        .service_tier
+                        .snapshot()
+                        .is_some_and(|snapshot| snapshot.current_value.as_deref() == Some(value.as_str()))
+                    {
+                        return Ok(CommandReceipt {
+                            accepted: true,
+                            admission: Admission::NoTurn,
+                            turn_gen: self.turn_gen.load(Ordering::SeqCst),
+                        });
+                    }
+                    disc.service_tier.revision
+                };
+                let id = self.next_rpc_id();
+                self.pending_set
+                    .lock()
+                    .await
+                    .insert(id, format!("service_tier→{value}"));
+                // Standard clears the override; Fast uses the model-advertised id.
+                let tier = if value == "standard" {
+                    Value::Null
+                } else {
+                    Value::String(value.clone())
+                };
+                self.write_frame(json!({"jsonrpc":"2.0","id":id,"method":"thread/settings/update",
+                    "params":{"threadId":tid,"serviceTier":tier}}))
+                    .await?;
+                for _ in 0..100 {
+                    let observed = {
+                        let disc = self.discovered.lock().unwrap_or_else(|e| e.into_inner());
+                        disc.service_tier.revision > revision
+                            && disc.service_tier.snapshot().is_some_and(|s| {
+                                s.current_value.as_deref() == Some(value.as_str())
+                                    && s.options.iter().any(|option| option.value == value)
+                            })
+                    };
+                    if observed {
+                        tracing::info!(service_tier = %value, "codex service tier confirmed by thread settings");
+                        return Ok(CommandReceipt {
+                            accepted: true,
+                            admission: Admission::NoTurn,
+                            turn_gen: self.turn_gen.load(Ordering::SeqCst),
+                        });
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(BackendError::CommandNotSupported {
+                    command: "service_tier_not_observed",
+                })
+            }
             Command::SetConfigOption { .. } => Err(BackendError::CommandNotSupported {
                 command: "set_config_option",
             }),
@@ -4578,7 +4944,27 @@ impl SessionBackend for CodexSessionBackend {
         if !disc.modes.is_empty() {
             caps.available_modes = disc.modes.clone();
         }
+        caps.service_tier = disc.service_tier.snapshot();
         caps
+    }
+
+    fn question_answer_message(
+        &self,
+        request_id: &str,
+        answers: Option<&[super::types::QuestionAnswer]>,
+    ) -> Result<Option<String>, BackendError> {
+        let pending = self.pending_tool_approvals.lock().unwrap_or_else(|e| e.into_inner());
+        match pending.get(request_id) {
+            Some(PendingCodexRequest::Question(request)) if request.asynchronous => {
+                request.answer_message(answers).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn question_blocks_send(&self, request_id: &str) -> bool {
+        let pending = self.pending_tool_approvals.lock().unwrap_or_else(|e| e.into_inner());
+        !matches!(pending.get(request_id), Some(PendingCodexRequest::Question(request)) if request.asynchronous)
     }
 
     /// REST-recovery (`GET /confirmations`) source: the transient registry of
@@ -4590,18 +4976,26 @@ impl SessionBackend for CodexSessionBackend {
     /// before the client subscribed — or lost on a page reload — could never be
     /// rebuilt, and the turn hung forever waiting for an answer. The recovered
     /// card's id==call_id==request_id, matching the live `Permission` frame so a
-    /// duplicate live+recovered pair de-dups. codex approvals carry no question
-    /// payload (AskUserQuestion is claude-only), so `questions` is always `None`;
+    /// duplicate live+recovered pair de-dups. Native questions carry the same
+    /// normalized questions as the live Ask frame; answered questions are excluded;
     /// the raw command body is NOT exposed (TIO-13) — only the approval-class title.
     fn pending_permission_requests(&self) -> Vec<PendingPermissionView> {
         self.pending_tool_approvals
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .map(|(request_id, title)| PendingPermissionView {
-                request_id: request_id.clone(),
-                tool_name: title.clone(),
-                questions: None,
+            .filter_map(|(request_id, request)| match request {
+                PendingCodexRequest::Approval(title) => Some(PendingPermissionView {
+                    request_id: request_id.clone(),
+                    tool_name: title.clone(),
+                    questions: None,
+                }),
+                PendingCodexRequest::Question(request) => Some(PendingPermissionView {
+                    request_id: request_id.clone(),
+                    tool_name: "AskUserQuestion".into(),
+                    questions: Some(request.card()),
+                }),
+                PendingCodexRequest::AnsweredQuestion { .. } => None,
             })
             .collect()
     }
@@ -5282,6 +5676,363 @@ mod tests {
             backend.pending_permission_requests().is_empty(),
             "recovery list EMPTY after the approval is answered"
         );
+    }
+
+    #[tokio::test]
+    async fn codex_questions_async_recovery_answer_no_rpc_and_late_completed_dedup() {
+        let capture: Value = serde_json::from_str(include_str!(
+            "../../../../docs/protocol-schemas/codex-0.164.0-alpha.11.1/async-question-and-answer-capture.json"
+        ))
+        .unwrap();
+        let frame = capture
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|frame| frame["method"] == "item/started" && frame["params"]["item"]["questions"].is_array())
+            .unwrap()
+            .clone();
+        assert!(
+            !map_notification("item/started", &frame["params"])
+                .iter()
+                .any(|event| matches!(event, SessionEvent::MessageDelta { .. })),
+            "structured questions must not also become an inert prose list"
+        );
+        let mut completed = frame.clone();
+        completed["method"] = json!("item/completed");
+        let fake = FakeAgentIo::never_exits(Vec::new()).with_gated_segments(vec![
+            format!("{frame}\n").into_bytes(),
+            format!("{completed}\n").into_bytes(),
+        ]);
+        let captured = fake.captured_stdin();
+        let release = fake.segment_releaser();
+        let backend = CodexSessionBackend::build_with_io("codex-async", Box::new(fake)).await;
+        let mut events = backend.events();
+        release();
+        let request_id = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while let Some(env) = events.next().await {
+                if let SessionEvent::Ask { request_id, questions } = env.event {
+                    assert_eq!(questions[0]["options"][1]["label"], "Spacious");
+                    return request_id;
+                }
+            }
+            panic!("missing async card");
+        })
+        .await
+        .unwrap();
+        assert_eq!(backend.pending_permission_requests().len(), 1);
+        assert!(!backend.question_blocks_send(&request_id));
+        let answers = vec![super::super::types::QuestionAnswer {
+            question: "Choose a test layout".into(),
+            labels: vec!["Spacious".into()],
+        }];
+        assert!(backend.question_answer_message(&request_id, Some(&[])).is_err());
+        assert!(
+            backend
+                .question_answer_message(&request_id, Some(&answers))
+                .unwrap()
+                .unwrap()
+                .contains("Spacious")
+        );
+        let before = captured_str(&captured).await;
+        backend
+            .dispatch(Command::AnswerAsk {
+                request_id: request_id.clone(),
+                answers: Some(answers),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            captured_str(&captured).await,
+            before,
+            "async acknowledgement must not fabricate a reverse-RPC response"
+        );
+        assert!(backend.pending_permission_requests().is_empty());
+        release();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(
+            backend.pending_permission_requests().is_empty(),
+            "late completed must not resurrect an answered card"
+        );
+        assert!(
+            backend
+                .dispatch(Command::AnswerAsk {
+                    request_id,
+                    answers: None
+                })
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_questions_reverse_rpc_recovery_answer_and_duplicate_submission() {
+        for id in [json!(71), json!("native-question")] {
+            let frame = json!({ "jsonrpc": "2.0", "id": id, "method": "item/tool/requestUserInput", "params": {
+                "threadId": "th-1", "turnId": "turn-1", "itemId": "item-1", "isBlocking": true,
+                "questions": [{ "id": "location", "header": "Location", "question": "Where?", "options": [
+                    { "label": "UI", "description": "Keep in UI" }, { "label": "Activity", "description": "Move" }
+                ] }]
+            } });
+            let fake = FakeAgentIo::never_exits(Vec::new())
+                .with_gated_segments(vec![format!("{frame}\n").into_bytes(), Vec::new()]);
+            let captured = fake.captured_stdin();
+            let release = fake.segment_releaser();
+            let backend = CodexSessionBackend::build_with_io("codex-question", Box::new(fake)).await;
+            let mut events = backend.events();
+            release();
+            let request_id = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while let Some(env) = events.next().await {
+                    if let SessionEvent::Ask { request_id, questions } = env.event {
+                        assert_eq!(questions[0]["question"], "Where?");
+                        return request_id;
+                    }
+                }
+                panic!("missing Ask");
+            })
+            .await
+            .unwrap();
+            let recovered = backend.pending_permission_requests();
+            assert_eq!(recovered.len(), 1);
+            assert_eq!(recovered[0].request_id, request_id);
+            assert_eq!(recovered[0].tool_name, "AskUserQuestion");
+            assert_eq!(recovered[0].questions.as_ref().unwrap()[0]["options"][0]["label"], "UI");
+            assert!(
+                backend
+                    .dispatch(Command::AnswerPermission {
+                        request_id: request_id.clone(),
+                        decision: crate::PermissionDecision::Approved,
+                        selected: None,
+                        answers: vec![],
+                    })
+                    .await
+                    .is_err(),
+                "questions cannot be authorized"
+            );
+            let command = Command::AnswerAsk {
+                request_id: request_id.clone(),
+                answers: Some(vec![super::super::types::QuestionAnswer {
+                    question: "Where?".into(),
+                    labels: vec!["Activity".into()],
+                }]),
+            };
+            backend.dispatch(command.clone()).await.unwrap();
+            assert!(backend.pending_permission_requests().is_empty());
+            assert!(
+                backend.dispatch(command).await.is_err(),
+                "duplicate submission is rejected"
+            );
+            let written = captured_str(&captured).await;
+            let response: Value = serde_json::from_str(written.lines().last().unwrap()).unwrap();
+            assert_eq!(
+                response,
+                json!({ "jsonrpc": "2.0", "id": id, "result": { "answers": { "location": { "answers": ["Activity"] } } } })
+            );
+            let env = tokio::time::timeout(std::time::Duration::from_secs(3), events.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(env.event, SessionEvent::AskResolved { request_id: ref resolved } if resolved == &request_id)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_questions_server_retraction_resolves_ask_not_permission() {
+        let events = drive_codex(&[
+            r#"{"id":7,"method":"item/tool/requestUserInput","params":{"questions":[{"id":"x","header":"X","question":"Pick?"}]}}"#,
+            r#"{"method":"serverRequest/resolved","params":{"requestId":7,"threadId":"th1"}}"#,
+        ]).await;
+        assert_eq!(
+            events.iter().filter(|e| matches!(e, SessionEvent::Ask { .. })).count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, SessionEvent::AskResolved { .. }))
+                .count(),
+            1
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::PermissionResolved { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_questions_explicit_decline_writes_empty_native_map() {
+        let fake = FakeAgentIo::never_exits(Vec::new());
+        let captured = fake.captured_stdin();
+        let backend = CodexSessionBackend::build_with_io("codex-question", Box::new(fake)).await;
+        backend.pending_tool_approvals.lock().unwrap().insert(
+            "7".into(),
+            PendingCodexRequest::Question(
+                CodexQuestionRequest::parse(
+                    json!(7),
+                    json!({"questions":[{"id":"x","header":"X","question":"Pick?"}]}),
+                    0,
+                )
+                .unwrap(),
+            ),
+        );
+        backend
+            .dispatch(Command::AnswerAsk {
+                request_id: "7".into(),
+                answers: None,
+            })
+            .await
+            .unwrap();
+        let written = captured_str(&captured).await;
+        let response: Value = serde_json::from_str(written.lines().last().unwrap()).unwrap();
+        assert_eq!(response["result"], json!({ "answers": {} }));
+        assert!(backend.pending_permission_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn codex_questions_turn_terminal_retires_unanswered_question_once() {
+        let events = drive_codex(&[
+            r#"{"id":7,"method":"item/tool/requestUserInput","params":{"questions":[{"id":"x","header":"X","question":"Pick?"}]}}"#,
+            r#"{"method":"turn/completed","params":{"threadId":"th1","turn":{"id":"t1","status":"interrupted"}}}"#,
+            r#"{"method":"serverRequest/resolved","params":{"requestId":7,"threadId":"th1"}}"#,
+        ]).await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, SessionEvent::AskResolved { .. }))
+                .count(),
+            1
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::PermissionResolved { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_questions_nonblocking_request_survives_turn_terminal_until_process_exit() {
+        let backend =
+            CodexSessionBackend::build_with_io("codex-question", Box::new(FakeAgentIo::never_exits(Vec::new()))).await;
+        backend.pending_tool_approvals.lock().unwrap().insert(
+            "7".into(),
+            PendingCodexRequest::Question(
+                CodexQuestionRequest::parse(
+                    json!(7),
+                    json!({"isBlocking":false,"questions":[{"id":"x","header":"X","question":"Pick?"}]}),
+                    0,
+                )
+                .unwrap(),
+            ),
+        );
+        resolve_codex_questions(
+            &backend.pending_tool_approvals,
+            &backend.event_tx,
+            &backend.session_id,
+            false,
+        );
+        assert_eq!(backend.pending_permission_requests().len(), 1);
+        resolve_codex_questions(
+            &backend.pending_tool_approvals,
+            &backend.event_tx,
+            &backend.session_id,
+            true,
+        );
+        assert!(backend.pending_permission_requests().is_empty());
+        assert!(
+            backend.pending_tool_approvals.lock().unwrap().is_empty(),
+            "a new process can reuse native IDs"
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_questions_reused_native_id_never_accepts_a_stale_card() {
+        let backend = CodexSessionBackend::build_with_io(
+            "codex-question",
+            Box::new(FakeAgentIo::never_exits(Vec::new()).with_gated_tail(Vec::new())),
+        )
+        .await;
+        let _events = backend.events();
+        let frame = json!({"id":0,"params":{"questions":[{"id":"x","header":"X","question":"Pick?"}]}});
+        handle_reverse_rpc(
+            "item/tool/requestUserInput",
+            &frame,
+            &backend.session_id,
+            &backend.turn_gen,
+            &backend.event_tx,
+            &backend.pending_auth_id,
+            &backend.pending_tool_approvals,
+            &backend.stdin,
+        )
+        .await;
+        let old_request = backend.pending_permission_requests()[0].request_id.clone();
+        backend
+            .dispatch(Command::AnswerAsk {
+                request_id: old_request.clone(),
+                answers: None,
+            })
+            .await
+            .unwrap();
+        handle_reverse_rpc(
+            "item/tool/requestUserInput",
+            &frame,
+            &backend.session_id,
+            &backend.turn_gen,
+            &backend.event_tx,
+            &backend.pending_auth_id,
+            &backend.pending_tool_approvals,
+            &backend.stdin,
+        )
+        .await;
+        let current = backend.pending_permission_requests();
+        assert_eq!(current.len(), 1);
+        assert_ne!(
+            old_request, current[0].request_id,
+            "native RPC ID reuse must create a fresh public token"
+        );
+        assert!(
+            backend
+                .dispatch(Command::AnswerAsk {
+                    request_id: old_request,
+                    answers: None
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            backend.pending_permission_requests().len(),
+            1,
+            "stale answer cannot consume the new request"
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_questions_failed_write_keeps_recovery_retryable() {
+        let backend =
+            CodexSessionBackend::build_with_io("codex-question", Box::new(FakeAgentIo::never_exits(Vec::new()))).await;
+        backend.pending_tool_approvals.lock().unwrap().insert(
+            "7".into(),
+            PendingCodexRequest::Question(
+                CodexQuestionRequest::parse(
+                    json!(7),
+                    json!({"questions":[{"id":"x","header":"X","question":"Pick?"}]}),
+                    0,
+                )
+                .unwrap(),
+            ),
+        );
+        *backend.stdin.lock().await = None;
+        assert!(
+            backend
+                .dispatch(Command::AnswerAsk {
+                    request_id: "7".into(),
+                    answers: None
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(backend.pending_permission_requests().len(), 1);
     }
 
     #[tokio::test]
@@ -7432,6 +8183,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_tier_discovery_pushes_both_notification_orders() {
+        for settings_first in [true, false] {
+            let settings = json!({"jsonrpc":"2.0","method":"thread/settings/updated",
+                "params":{"threadId":"th-speed","threadSettings":{"model":"speed-model","serviceTier":"priority"}}});
+            let models = json!({"jsonrpc":"2.0","id":50,"result":{"data":[{
+                "id":"speed-model","isDefault":true,"serviceTiers":[{"id":"priority","name":"Fast"}]
+            }]}});
+            let tail = if settings_first {
+                format!("{settings}\n{models}\n")
+            } else {
+                format!("{models}\n{settings}\n")
+            };
+            let fake = fake_with_binding("th-speed", None).with_gated_tail(tail.into_bytes());
+            let release = fake.stdout_releaser();
+            let backend = CodexSessionBackend::build_with_io("speed", Box::new(fake)).await;
+            backend.register_model_discovery_for_test(50).await;
+            let mut events = backend.events();
+            release();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while let Some(event) = events.next().await {
+                    if let SessionEvent::AdapterSpecific { tag, payload } = event.event
+                        && tag == "service_tier"
+                        && payload["current_value"] == "priority"
+                    {
+                        assert_eq!(payload["model_id"], "speed-model");
+                        assert_eq!(payload["options"][1]["value"], "priority");
+                        return;
+                    }
+                }
+                panic!("speed snapshot never emitted; settings_first={settings_first}");
+            })
+            .await
+            .expect("speed must be pushed without a REST refresh");
+        }
+    }
+
+    #[tokio::test]
+    async fn service_tier_rejects_unsupported_explicit_request_without_writing() {
+        let fake = fake_with_binding("th-speed", None);
+        let captured = fake.captured_stdin();
+        let backend = CodexSessionBackend::build_with_io("speed", Box::new(fake)).await;
+        backend
+            .discovered
+            .lock()
+            .unwrap()
+            .service_tier
+            .discover(&json!({"data":[{
+                "id":"standard-only","isDefault":true,"serviceTiers":[]
+            }]}));
+        let _events = backend.events();
+        let error = backend
+            .dispatch(Command::SetConfigOption {
+                option_id: "service_tier".into(),
+                value: "priority".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            BackendError::CommandNotSupported {
+                command: "service_tier"
+            }
+        ));
+        assert!(!captured_str(&captured).await.contains("serviceTier"));
+    }
+
+    /// Replay the observed 0.161.0 settings notification, gated until after the write.
+    #[tokio::test]
+    async fn service_tier_waits_for_observation_and_standard_clears_override() {
+        for (value, echoed) in [("priority", "priority"), ("standard", "default")] {
+            let notification = json!({"jsonrpc":"2.0","method":"thread/settings/updated",
+                "params":{"threadId":"th-speed","threadSettings":{"model":"speed-model","serviceTier":echoed}}});
+            let fake = fake_with_binding("th-speed", None).with_gated_tail(format!("{notification}\n").into_bytes());
+            let captured = fake.captured_stdin();
+            let release = fake.stdout_releaser();
+            let backend = Arc::new(CodexSessionBackend::build_with_io("speed", Box::new(fake)).await);
+            backend
+                .discovered
+                .lock()
+                .unwrap()
+                .service_tier
+                .discover(&json!({"data":[{
+                    "id":"speed-model","isDefault":true,
+                    "serviceTiers":[{"id":"priority","name":"Fast","description":"Higher usage"}]
+                }]}));
+            let _events = backend.events();
+            let task = {
+                let backend = backend.clone();
+                tokio::spawn(async move {
+                    backend
+                        .dispatch(Command::SetConfigOption {
+                            option_id: "service_tier".into(),
+                            value: value.into(),
+                        })
+                        .await
+                })
+            };
+            for _ in 0..40 {
+                if captured_str(&captured).await.contains("serviceTier") {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(
+                !task.is_finished(),
+                "a command acknowledgement cannot confirm a service tier"
+            );
+            let frame: Value = captured_str(&captured)
+                .await
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .find(|frame| frame["method"] == "thread/settings/update")
+                .unwrap();
+            assert_eq!(
+                frame["params"]["serviceTier"],
+                if value == "standard" { Value::Null } else { json!(value) }
+            );
+            release();
+            task.await
+                .unwrap()
+                .expect("matching settings notification confirms the switch");
+            assert_eq!(
+                backend.capabilities().service_tier.unwrap().current_value.as_deref(),
+                Some(value)
+            );
+            let before = captured_str(&captured).await;
+            backend
+                .dispatch(Command::SetConfigOption {
+                    option_id: "service_tier".into(),
+                    value: value.into(),
+                })
+                .await
+                .expect("an already observed value is idempotent");
+            assert_eq!(
+                captured_str(&captured).await,
+                before,
+                "do not wait for a redundant notification"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn dispatch_set_config_option_non_effort_still_rejects() {
         // Only the effort aliases have a codex wire; any other generic config option
         // still has none and must reject with CommandNotSupported (not silently drop).
@@ -8215,6 +9108,8 @@ mod tests {
                 "shell_environment_policy.inherit=all",
                 "-c",
                 "shell_environment_policy.include_only=[]",
+                "-c",
+                "features.default_mode_request_user_input=true",
             ],
             "every app-server spawn must explicitly propagate the parent environment to commandExecution shells"
         );
@@ -9428,6 +10323,8 @@ mod tests {
                 "shell_environment_policy.inherit=all",
                 "-c",
                 "shell_environment_policy.include_only=[]",
+                "-c",
+                "features.default_mode_request_user_input=true",
             ],
             "wake must restore the same explicit commandExecution environment policy as the initial spawn"
         );

@@ -1,0 +1,298 @@
+[
+  {
+    "method": "item/started",
+    "params": {
+      "item": {
+        "type": "userMessage",
+        "id": "01a1829a-ab33-7ce1-ac72-37db86fcb19c",
+        "clientId": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "This is a synthetic UI integration test. Call request_user_input_async exactly once to ask one question titled \"Choose a test layout\" with options \"Compact\" and \"Spacious\". Do not ask in prose. After asking, finish this turn with \"Waiting for test answer\". Do not run tools or modify files. When my answer arrives, repeat the selected label and finish.",
+            "text_elements": []
+          }
+        ]
+      },
+      "threadId": "01a1829a-9e28-7290-b919-a565e7632e0a",
+      "turnId": "01a1829a-9eb2-7e50-9f56-f25e9d1cb315",
+      "startedAtMs": 1793192536883
+    },
+    "emittedAtMs": 1793192536883
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "item": {
+        "type": "userMessage",
+        "id": "01a1829a-ab33-7ce1-ac72-37db86fcb19c",
+        "clientId": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "This is a synthetic UI integration test. Call request_user_input_async exactly once to ask one question titled \"Choose a test layout\" with options \"Compact\" and \"Spacious\". Do not ask in prose. After asking, finish this turn with \"Waiting for test answer\". Do not run tools or modify files. When my answer arrives, repeat the selected label and finish.",
+            "text_elements": []
+          }
+        ]
+      },
+      "threadId": "01a1829a-9e28-7290-b919-a565e7632e0a",
+      "turnId": "01a1829a-9eb2-7e50-9f56-f25e9d1cb315",
+      "completedAtMs": 1793192536883
+    },
+    "emittedAtMs": 1793192536883
+  },
+  {
+    "method": "item/started",
+    "params": {
+      "item": {
+        "type": "agentMessage",
+        "id": "call_7679c7e136594944ae42ce2ea9676a5e",
+        "text": "Choose a test layout\n- Compact\n- Spacious",
+        "phase": "final_answer",
+        "memoryCitation": null,
+        "delivery": "async",
+        "questions": [
+          {
+            "title": "Choose a test layout",
+            "options": [
+              "Compact",
+              "Spacious"
+            ]
+          }
+        ]
+      },
+      "threadId": "01a1829a-9e28-7290-b919-a565e7632e0a",
+      "turnId": "01a1829a-9eb2-7e50-9f56-f25e9d1cb315",
+      "startedAtMs": 1793192539920
+    },
+    "emittedAtMs": 1793192539921
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "item": {
+        "type": "agentMessage",
+        "id": "call_7679c7e136594944ae42ce2ea9676a5e",
+        "text": "Choose a test layout\n- Compact\n- Spacious",
+        "phase": "final_answer",
+        "memoryCitation": null,
+        "delivery": "async",
+        "questions": [
+          {
+            "title": "Choose a test layout",
+            "options": [
+              "Compact",
+              "Spacious"
+            ]
+          }
+        ]
+      },
+      "threadId": "01a1829a-9e28-7290-b919-a565e7632e0a",
+      "turnId": "01a1829a-9eb2-7e50-9f56-f25e9d1cb315",
+      "completedAtMs": 1793192539921
+    },
+    "emittedAtMs": 1793192539921
+  },
+  {
+    "method": "item/started",
+    "params": {
+      "item": {
+        "type": "agentMessage",
+        "id": "msg_04af79c3615aedaf016ae1f25e1c9c8198a96aac2b91dc9ed4",
+        "text": "",
+        "phase": "final_answer",
+        "memoryCitation": null,
+        "delivery": null,
+        "questions": null
+      },
+      "threadId": "01a1829a-9e28-7290-b919-a565e7632e0a",
+      "turnId": "01a1829a-9eb2-7e50-9f56-f25e9d1cb315",
+      "startedAtMs": 1793192542232
+    },
+    "emittedAtMs": 1793192542232
+  },
+  {
+    "method": "item/agentMessage/delta",
+    "params": {
+      "threadId": "01a1829a-9e28-7290-b919-a565e7632e0a",
+      "turnId": "01a1829a-9eb2-7e50-9f56-f25e9d1cb315",
+      "itemId": "msg_04af79c3615aedaf016ae1f25e1c9c8198a96aac2b91dc9ed4",
+      "delta": "Waiting"
+    },
+    "emittedAtMs": 1793192542232
+  },
+  {
+    "method": "item/agentMessage/delta",
+    "params": {
+      "threadId": "01a1829a-9e28-7290-b919-a565e7632e0a",
+      "turnId": "01a1829a-9eb2-7e50-9f56-f25e9d1cb315",
+      "itemId": "msg_04af79c3615aedaf016ae1f25e1c9c8198a96aac2b91dc9ed4",
+      "delta": " for"
+    },
+    "emittedAtMs": 1793192542232
+  },
+  {
+    "method": "item/agentMessage/delta",
+    "params": {
+      "threadId": "01a1829a-9e28-7290-b919-a565e7632e0a",
+      "turnId": "01a1829a-9eb2-7e50-9f56-f25e9d1cb315",
+      "itemId": "msg_04af79c3615aedaf016ae1f25e1c9c8198a96aac2b91dc9ed4",
+      "delta": " test"
+    },
+    "emittedAtMs": 1793192542232
+  },
+  {
+    "method": "item/agentMessage/delta",
+    "params": {
+      "threadId": "01a1829a-9e28-7290-b919-a565e7632e0a",
+      "turnId": "01a1829a-9eb2-7e50-9f56-f25e9d1cb315",
+      "itemId": "msg_04af79c3615aedaf016ae1f25e1c9c8198a96aac2b91dc9ed4",
+      "delta": " answer"
+    },
+    "emittedAtMs": 1793192542232
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "item": {
+        "type": "agentMessage",
+        "id": "msg_04af79c3615aedaf016ae1f25e1c9c8198a96aac2b91dc9ed4",
+        "text": "Waiting for test answer",
+        "phase": "final_answer",
+        "memoryCitation": null,
+        "delivery": null,
+        "questions": null
+      },
+      "threadId": "01a1829a-9e28-7290-b919-a565e7632e0a",
+      "turnId": "01a1829a-9eb2-7e50-9f56-f25e9d1cb315",
+      "completedAtMs": 1793192542269
+    },
+    "emittedAtMs": 1793192542269
+  },
+  {
+    "method": "turn/completed",
+    "params": {
+      "threadId": "01a1829a-9e28-7290-b919-a565e7632e0a",
+      "turn": {
+        "id": "01a1829a-9eb2-7e50-9f56-f25e9d1cb315",
+        "rootTurnId": "01a1829a-9eb2-7e50-9f56-f25e9d1cb315",
+        "items": [
+          {
+            "type": "agentMessage",
+            "id": "msg_04af79c3615aedaf016ae1f25e1c9c8198a96aac2b91dc9ed4",
+            "text": "Waiting for test answer",
+            "phase": "final_answer",
+            "memoryCitation": null,
+            "delivery": null,
+            "questions": null
+          }
+        ],
+        "itemsView": "summary",
+        "status": "completed",
+        "error": null,
+        "startedAt": 1793192533,
+        "completedAt": 1793192542,
+        "durationMs": 8636
+      }
+    },
+    "emittedAtMs": 1793192542324
+  },
+  {
+    "method": "item/started",
+    "params": {
+      "item": {
+        "type": "userMessage",
+        "id": "01a1829a-c086-7682-9e35-ed0ea52ec36b",
+        "clientId": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Answer to \"Choose a test layout\": Spacious.",
+            "text_elements": []
+          }
+        ]
+      },
+      "threadId": "01a1829a-9e28-7290-b919-a565e7632e0a",
+      "turnId": "01a1829a-c075-7052-8ed7-237666f027a5",
+      "startedAtMs": 1793192542342
+    },
+    "emittedAtMs": 1793192542342
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "item": {
+        "type": "userMessage",
+        "id": "01a1829a-c086-7682-9e35-ed0ea52ec36b",
+        "clientId": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Answer to \"Choose a test layout\": Spacious.",
+            "text_elements": []
+          }
+        ]
+      },
+      "threadId": "01a1829a-9e28-7290-b919-a565e7632e0a",
+      "turnId": "01a1829a-c075-7052-8ed7-237666f027a5",
+      "completedAtMs": 1793192542342
+    },
+    "emittedAtMs": 1793192542342
+  },
+  {
+    "method": "item/started",
+    "params": {
+      "item": {
+        "type": "agentMessage",
+        "id": "msg_04af79c3615aedaf016ae1f260e3d88198af42f3d66d374bee",
+        "text": "",
+        "phase": "final_answer",
+        "memoryCitation": null,
+        "delivery": null,
+        "questions": null
+      },
+      "threadId": "01a1829a-9e28-7290-b919-a565e7632e0a",
+      "turnId": "01a1829a-c075-7052-8ed7-237666f027a5",
+      "startedAtMs": 1793192544994
+    },
+    "emittedAtMs": 1793192544994
+  },
+  {
+    "method": "item/agentMessage/delta",
+    "params": {
+      "threadId": "01a1829a-9e28-7290-b919-a565e7632e0a",
+      "turnId": "01a1829a-c075-7052-8ed7-237666f027a5",
+      "itemId": "msg_04af79c3615aedaf016ae1f260e3d88198af42f3d66d374bee",
+      "delta": "Sp"
+    },
+    "emittedAtMs": 1793192544995
+  },
+  {
+    "method": "item/agentMessage/delta",
+    "params": {
+      "threadId": "01a1829a-9e28-7290-b919-a565e7632e0a",
+      "turnId": "01a1829a-c075-7052-8ed7-237666f027a5",
+      "itemId": "msg_04af79c3615aedaf016ae1f260e3d88198af42f3d66d374bee",
+      "delta": "acious"
+    },
+    "emittedAtMs": 1793192544995
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "item": {
+        "type": "agentMessage",
+        "id": "msg_04af79c3615aedaf016ae1f260e3d88198af42f3d66d374bee",
+        "text": "Spacious",
+        "phase": "final_answer",
+        "memoryCitation": null,
+        "delivery": null,
+        "questions": null
+      },
+      "threadId": "01a1829a-9e28-7290-b919-a565e7632e0a",
+      "turnId": "01a1829a-c075-7052-8ed7-237666f027a5",
+      "completedAtMs": 1793192545062
+    },
+    "emittedAtMs": 1793192545062
+  }
+]

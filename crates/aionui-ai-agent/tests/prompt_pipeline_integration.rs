@@ -46,6 +46,7 @@ async fn fixture_params(
         session_mode: None,
         current_model_id: None,
         thought_level: None,
+        pending_config_options: Default::default(),
         cron_job_id: None,
         team_mcp_stdio_config: None,
         mcp_server_ids: None,

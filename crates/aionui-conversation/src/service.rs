@@ -313,6 +313,7 @@ fn reject_deprecated_runtime_row(row: &ConversationRow) -> Result<(), Conversati
 #[derive(Clone)]
 pub struct ConversationService {
     workspace_root: PathBuf,
+    question_answer_gate: Arc<tokio::sync::Mutex<()>>,
     broadcaster: Arc<dyn EventBroadcaster>,
     skill_resolver: Arc<dyn SkillResolver>,
     task_manager: Arc<dyn IWorkerTaskManager>,
@@ -426,6 +427,7 @@ impl ConversationService {
             runtime_base_url: None,
             runtime_token_service: None,
             background_watchers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            question_answer_gate: Arc::new(tokio::sync::Mutex::new(())),
 
             conversation_repo,
             agent_metadata_repo,
@@ -3515,7 +3517,28 @@ impl ConversationService {
             .find(|c| c.call_id == request_id)
             .map(|c| c.id.clone());
 
-        agent.answer_ask(request_id, answers)?;
+        let _answer_guard = self.question_answer_gate.lock().await;
+        // Validate the still-pending token inside the serialized section. Async
+        // answers use the ordinary send service, preserving history, mid-turn
+        // delivery, runtime claims and the normal stream relay.
+        if let Some(content) = agent.question_answer_message(request_id, answers.as_deref())?
+            && !content.is_empty()
+        {
+            self.send_message(
+                user_id,
+                conversation_id,
+                SendMessageRequest {
+                    content,
+                    files: Vec::new(),
+                    sessions: Vec::new(),
+                    inject_skills: Vec::new(),
+                    hidden: false,
+                },
+                task_manager,
+            )
+            .await?;
+        }
+        agent.answer_ask(request_id, answers).await?;
 
         if let Some(conf_id) = conf_id {
             let payload = serde_json::json!({
@@ -3896,7 +3919,11 @@ impl ConversationService {
             // HTTP layer, so a direct API client cannot bypass the frontend
             // gate. Same authoritative source the runtime summary's
             // `pending_confirmations` reads (`get_confirmations`).
-            if !agent.get_confirmations().is_empty() {
+            if agent
+                .get_confirmations()
+                .iter()
+                .any(|confirmation| agent.question_blocks_send(&confirmation.call_id))
+            {
                 // Once per turn, not once per attempt: the cross-session
                 // drainer retries a queued delivery every second and each
                 // retry is refused identically, which turned one unanswered

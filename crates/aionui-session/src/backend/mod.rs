@@ -13,6 +13,8 @@ mod antigravity;
 mod claude_conn;
 mod cli_version;
 mod codex_conn;
+mod codex_questions;
+mod codex_service_tier;
 mod codex_title;
 mod conversation_session;
 mod descriptor;
@@ -84,6 +86,21 @@ pub trait SessionBackend: Send + Sync {
     /// turn flows up `events()`). Capability-gated: an unsupported command
     /// returns `BackendError::CommandNotSupported`.
     async fn dispatch(&self, command: Command) -> Result<CommandReceipt, BackendError>;
+
+    /// Some agents deliver nonblocking questions whose answers are ordinary user
+    /// messages. Prepare and validate that message without consuming the card.
+    fn question_answer_message(
+        &self,
+        _request_id: &str,
+        _answers: Option<&[QuestionAnswer]>,
+    ) -> Result<Option<String>, BackendError> {
+        Ok(None)
+    }
+
+    /// Nonblocking question cards must not prevent ordinary mid-turn delivery.
+    fn question_blocks_send(&self, _request_id: &str) -> bool {
+        true
+    }
 
     /// The upward event stream, wrapped in `SessionEnvelope{session_id, turn_gen,
     /// event}`. A process crash flows OUT as `Detached{exit}` (no `wait_for_exit`

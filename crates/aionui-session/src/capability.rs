@@ -69,6 +69,8 @@ pub struct Capabilities {
     /// the last value it set via `SetConfigOption{effort}` and surfaces it here so the
     /// picker highlights the active level. `None` = no effort axis / never set.
     pub current_effort: Option<String>,
+    /// Model-advertised speed choices and the last observed service tier.
+    pub service_tier: Option<ServiceTierSnapshot>,
     /// NEW (007 §9.17/Addendum 9): auth methods. NON-EMPTY ⇒ this backend can
     /// raise a mid-session `Permission{kind:Auth}` and accept `AnswerAuth` →
     /// enables the `waiting_on_auth` counter path. Empty = no mid-session auth.
@@ -303,4 +305,19 @@ mod tests {
         assert!(!backend_supports_midturn_delivery(""));
         assert!(!backend_supports_midturn_delivery("aionrs"));
     }
+}
+
+/// Speed configuration projected from Codex model/list and thread settings.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct ServiceTierSnapshot {
+    pub model_id: String,
+    pub current_value: Option<String>,
+    pub options: Vec<ServiceTierOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ServiceTierOption {
+    pub value: String,
+    pub name: String,
+    pub description: Option<String>,
 }

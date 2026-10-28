@@ -131,12 +131,14 @@ struct SessionRuntime {
     /// fallback order.
     /// Order is `override → this`, identical to REST.
     caps_fallback: std::sync::Mutex<CapsFallback>,
+    selection_persist_lock: tokio::sync::Mutex<()>,
 }
 
 /// Backend-reported current values, mirrored out of `capabilities()` so the
 /// backend-Arc-free event pump can apply the same fallback REST applies.
 #[derive(Debug, Clone, Default)]
 struct CapsFallback {
+    service_tier: Option<aionui_session::ServiceTierSnapshot>,
     mode: Option<String>,
     model: Option<String>,
     effort: Option<String>,
@@ -495,6 +497,7 @@ impl SessionAgentTask {
             effort_override: std::sync::Mutex::new(None),
             last_catalog: std::sync::Mutex::new(None),
             caps_fallback: std::sync::Mutex::new(CapsFallback::default()),
+            selection_persist_lock: tokio::sync::Mutex::new(()),
         });
         // Subscribe to the backend's event stream HERE (sync), then hand ONLY the
         // stream to the pump — never a backend Arc (see `spawn_event_pump` for why
@@ -776,7 +779,30 @@ impl SessionAgentTask {
     /// permission confirm endpoint). `answers: None` = the user dismissed the
     /// card; the claude adapter maps that to a deny (an allow with no answers
     /// is silent data loss — claude drops unanswered questions, live 2.1.178).
-    pub fn answer_ask(
+    pub fn question_blocks_send(&self, request_id: &str) -> bool {
+        self.backend.question_blocks_send(request_id)
+    }
+
+    pub fn question_answer_message(
+        &self,
+        request_id: &str,
+        answers: Option<&[aionui_api_types::AskQuestionAnswer]>,
+    ) -> Result<Option<String>, AgentError> {
+        let answers = answers.map(|answers| {
+            answers
+                .iter()
+                .map(|answer| aionui_session::QuestionAnswer {
+                    question: answer.question.clone(),
+                    labels: answer.labels.clone(),
+                })
+                .collect::<Vec<_>>()
+        });
+        self.backend
+            .question_answer_message(request_id, answers.as_deref())
+            .map_err(|error| AgentError::BadRequest(error.to_string()))
+    }
+
+    pub async fn answer_ask(
         &self,
         request_id: &str,
         answers: Option<Vec<aionui_api_types::AskQuestionAnswer>>,
@@ -791,31 +817,15 @@ impl SessionAgentTask {
                 })
                 .collect::<Vec<_>>()
         });
-        let backend = self.backend.clone();
-        let request_id = request_id.to_string();
-        let conv_id = self.conversation_id.clone();
-        // Same fire-and-forget shape as confirm(): the REST reply has already
-        // returned by the time the dispatch runs, so a failure here MUST be
-        // surfaced in the log or a wedged ask is undiagnosable in production.
-        tokio::spawn(async move {
-            let command = aionui_session::Command::AnswerAsk {
-                request_id: request_id.clone(),
-                answers,
-            };
-            match backend.dispatch(command).await {
-                Ok(_) => tracing::info!(
-                    conv_id = %conv_id,
-                    request_id = %request_id,
-                    "ask answer delivered to backend (dedicated channel)"
-                ),
-                Err(e) => tracing::error!(
-                    conv_id = %conv_id,
-                    request_id = %request_id,
-                    error = %e,
-                    "ask answer FAILED after REST reply already returned success — claude stays blocked on can_use_tool"
-                ),
-            }
-        });
+        let command = aionui_session::Command::AnswerAsk {
+            request_id: request_id.to_string(),
+            answers,
+        };
+        self.backend.dispatch(command).await.map_err(|error| {
+            tracing::warn!(conv_id = %self.conversation_id, %request_id, %error, "question answer was not delivered");
+            AgentError::BadGateway(error.to_string())
+        })?;
+        tracing::info!(conv_id = %self.conversation_id, %request_id, "question answer delivered to backend");
         Ok(())
     }
 
@@ -990,6 +1000,7 @@ impl SessionAgentTask {
             mode: current_mode.clone(),
             model: current_model.clone(),
             effort: self.backend.capabilities().current_effort,
+            service_tier: self.backend.capabilities().service_tier,
         });
         // Same reason, for the catalog itself: a later confirmation has to re-project the
         // WHOLE snapshot, and the pump can only do that from a catalog it was handed.
@@ -1083,6 +1094,9 @@ impl SessionAgentTask {
                     .collect(),
             });
         }
+        if let Some(snapshot) = self.backend.capabilities().service_tier {
+            config_options.push(service_tier_config_option(&snapshot));
+        }
         Ok(aionui_api_types::GetConfigOptionsResponse { config_options })
     }
 
@@ -1165,6 +1179,10 @@ impl SessionAgentTask {
         // observed re-read — the frontend's `hasObservedValue` requires Observed AND the
         // option's current_value == requested, same as mode/model.
         match option_id {
+            "service_tier" => {
+                // Backend dispatch returns only after a matching settings notification.
+                self.persist_config_selection("service_tier", value).await;
+            }
             // Adopt the value as the picker highlight ONLY when it is really in force.
             // Writing the override for a deferred switch is exactly what made the old
             // response self-fulfilling — it read straight back and reported Observed
@@ -1187,7 +1205,7 @@ impl SessionAgentTask {
                 // the ONLY place the choice is durably recorded. Backend already accepted
                 // + validated it (dispatch above); best-effort persist (a DB failure must
                 // not fail the switch the CLI already applied).
-                self.persist_effort(value).await;
+                self.persist_config_selection(EFFORT_CONFIG_KEY, value).await;
             }
             _ => {
                 return Ok(aionui_api_types::SetConfigOptionResponse {
@@ -1228,50 +1246,18 @@ impl SessionAgentTask {
         })
     }
 
-    /// Persist the chosen effort level into `acp_session.config_selections` (under
-    /// [`EFFORT_CONFIG_KEY`]) so it survives a respawn/resume. Reads the existing
+    /// Persist an observed configuration selection so it survives respawn/resume.
+    /// Reads the existing
     /// selections first and MERGES (rather than overwriting the whole map) so any other
     /// future config key is preserved. Best-effort: a repo miss/failure is logged, not
     /// propagated — the backend already applied the effort, and losing only the
     /// persistence (not the live switch) is the safe degradation. No-op without a repo.
-    async fn persist_effort(&self, value: &str) {
+    async fn persist_config_selection(&self, key: &str, value: &str) {
         let Some(repo) = self.session_repo.as_ref() else {
             return;
         };
-        // Merge into the existing selection map (preserve unrelated keys).
-        let mut selections: std::collections::HashMap<String, String> = match repo
-            .load_runtime_state_for_user(&self.user_id, &self.conversation_id)
-            .await
-        {
-            Ok(Some(state)) => state
-                .config_selections_json
-                .as_deref()
-                .and_then(|raw| serde_json::from_str(raw).ok())
-                .unwrap_or_default(),
-            Ok(None) => std::collections::HashMap::new(),
-            Err(err) => {
-                tracing::warn!(conversation_id = %self.conversation_id, error = %err, "persist_effort: load_runtime_state failed; skipping effort persist");
-                return;
-            }
-        };
-        selections.insert(EFFORT_CONFIG_KEY.to_owned(), value.to_owned());
-        let json = match serde_json::to_string(&selections) {
-            Ok(j) => j,
-            Err(err) => {
-                tracing::warn!(conversation_id = %self.conversation_id, error = %err, "persist_effort: encode config_selections failed");
-                return;
-            }
-        };
-        let params = SaveRuntimeStateParams {
-            config_selections_json: Some(Some(&json)),
-            ..Default::default()
-        };
-        if let Err(err) = repo
-            .save_runtime_state_for_user(&self.user_id, &self.conversation_id, &params)
-            .await
-        {
-            tracing::warn!(conversation_id = %self.conversation_id, error = %err, "persist_effort: save_runtime_state failed");
-        }
+        let _guard = self.runtime.selection_persist_lock.lock().await;
+        persist_config_selection(repo.as_ref(), &self.user_id, &self.conversation_id, key, value).await;
     }
 
     /// Session usage snapshot, served from the persisted `context_usage` runtime
@@ -1607,6 +1593,33 @@ pub(crate) fn resolved_effort(
         })
         .or_else(|| config.thought_level.clone())
         .filter(|value| !value.is_empty())
+}
+
+/// Preserve a supported saved choice; an obsolete saved Fast tier must not
+/// prevent resume on a model/CLI that no longer advertises that capability.
+fn restored_service_tier(value: &str, snapshot: Option<&aionui_session::ServiceTierSnapshot>) -> Option<String> {
+    let snapshot = snapshot?;
+    let supported = |value: &str| snapshot.options.iter().any(|option| option.value == value);
+    if supported(value) {
+        return Some(value.to_owned());
+    }
+    snapshot
+        .current_value
+        .as_deref()
+        .filter(|value| supported(value))
+        .map(str::to_owned)
+        .or_else(|| supported("standard").then(|| "standard".to_owned()))
+}
+
+fn resolved_service_tier(config: &AcpBuildExtra, session_snapshot: Option<&PersistedSessionState>) -> Option<String> {
+    session_snapshot
+        .and_then(|s| {
+            s.config_selections
+                .iter()
+                .find(|(key, _)| key.as_str() == "service_tier")
+        })
+        .map(|(_, value)| value.as_str().to_owned())
+        .or_else(|| config.pending_config_options.get("service_tier").cloned())
 }
 
 /// The persisted session-cumulative cost (USD) that seeds the claude backend's
@@ -2078,6 +2091,13 @@ pub async fn build_session_instance(
     // carried from the new-conversation screen all along and nothing ever read
     // it, so an effort chosen before the first turn was dropped.
     let persisted_effort = resolved_effort(config, session_snapshot);
+    let mut persisted_service_tier = resolved_service_tier(config, session_snapshot);
+    let restoring_speed = session_snapshot.is_some_and(|snapshot| {
+        snapshot
+            .config_selections
+            .keys()
+            .any(|key| key.as_str() == "service_tier")
+    });
 
     // DEV (`--dump-prompts`): dump the resolved SessionConfig BEFORE it moves
     // into open_session. Best-effort — a failure only warns, never fails open.
@@ -2117,6 +2137,7 @@ pub async fn build_session_instance(
         }
     }
 
+    let expected_speed_model = session_config.model.clone();
     let backend = connection
         .open_session(spec, session_config)
         .await
@@ -2151,6 +2172,53 @@ pub async fn build_session_instance(
         }
     }
 
+    if persisted_service_tier.is_some() {
+        // Model reconciliation is asynchronous. Validate/apply speed only after the
+        // requested model is actually observed, so another model's tier list cannot win.
+        if let Some(model) = expected_speed_model.as_deref() {
+            let mut matched = false;
+            for _ in 0..100 {
+                if backend
+                    .capabilities()
+                    .service_tier
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.model_id == model)
+                {
+                    matched = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            if !matched && !restoring_speed {
+                return Err(AgentError::bad_request(
+                    "Service tier model was not observed before startup",
+                ));
+            }
+            if !matched {
+                tracing::warn!(conv_id = %conversation_id, "session-port: saved speed model not observed; preserving resumed settings");
+                persisted_service_tier = None;
+            }
+        }
+        if restoring_speed && let Some(value) = persisted_service_tier.as_deref() {
+            let snapshot = backend.capabilities().service_tier;
+            let restored = restored_service_tier(value, snapshot.as_ref());
+            if restored.as_deref() != Some(value) {
+                tracing::info!(conv_id = %conversation_id, saved = value, restored = ?restored,
+                    "session-port: obsolete saved speed reconciled with current model");
+            }
+            persisted_service_tier = restored;
+        }
+        if let Some(value) = persisted_service_tier.as_ref() {
+            backend
+                .dispatch(Command::SetConfigOption {
+                    option_id: "service_tier".into(),
+                    value: value.clone(),
+                })
+                .await
+                .map_err(|error| AgentError::bad_request(format!("Service tier was not applied: {error}")))?;
+        }
+    }
+
     // GAP #7 (G5): project the backend's discovered catalog back into agent_metadata
     // so the cold-start picker stays fresh. Best-effort, detached, off the open path.
     if let Some((agent_id, catalog_tx)) = catalog_writeback {
@@ -2177,6 +2245,9 @@ pub async fn build_session_instance(
         // already stopped listening — the claude case (usage rides `result`).
         Some(broadcaster),
     );
+    if let Some(value) = persisted_service_tier {
+        task.persist_config_selection("service_tier", &value).await;
+    }
     Ok(Some(crate::agent_task::AgentInstance::Session(task)))
 }
 
@@ -2465,6 +2536,12 @@ fn catalog_partial_from_caps(caps: &aionui_session::Capabilities) -> Option<aion
             })).collect::<Vec<_>>(),
         }));
     }
+    if let Some(snapshot) = caps.service_tier.as_ref() {
+        let mut option = service_tier_config_option(snapshot);
+        // A shared agent catalog must never copy another conversation's selection.
+        option.current_value = None;
+        config_options.push(serde_json::to_value(option).expect("service tier option serializes"));
+    }
     let available_commands = if caps.slash_commands.is_empty() {
         None
     } else {
@@ -2630,6 +2707,28 @@ fn session_event_name(e: &SessionEvent) -> &'static str {
 ///
 /// Two callers, deliberately sharing one projection: the catalog arrival itself, and a
 /// later `ConfigChanged` confirming an agent-applied mode/model.
+fn service_tier_config_option(snapshot: &aionui_session::ServiceTierSnapshot) -> aionui_api_types::AcpConfigOptionDto {
+    aionui_api_types::AcpConfigOptionDto {
+        id: "service_tier".into(),
+        name: Some("Speed".into()),
+        label: None,
+        description: None,
+        category: Some("speed".into()),
+        option_type: "select".into(),
+        current_value: snapshot.current_value.clone(),
+        options: snapshot
+            .options
+            .iter()
+            .map(|option| aionui_api_types::AcpConfigSelectOptionDto {
+                value: option.value.clone(),
+                name: Some(option.name.clone()),
+                label: None,
+                description: option.description.clone(),
+            })
+            .collect(),
+    }
+}
+
 fn emit_config_options_snapshot(modes: &[ModeInfo], models: &[ModelInfo], runtime: &SessionRuntime) {
     // Same fallback order REST uses (`override → backend-reported`). Without the second
     // half, every axis the user never picked would go out as `None` and blank that picker,
@@ -2702,6 +2801,9 @@ fn emit_config_options_snapshot(modes: &[ModeInfo], models: &[ModelInfo], runtim
                 })
                 .collect(),
         });
+    }
+    if let Some(snapshot) = fallback.service_tier.as_ref() {
+        config_options.push(service_tier_config_option(snapshot));
     }
     // No categories → nothing to re-project; a spurious empty-snapshot frame would only
     // clobber the frontend's picker.
@@ -2971,6 +3073,25 @@ fn spawn_event_pump(
             // here, not in the stateless `translate_event`, because the current-value
             // highlight needs the runtime's optimistic overrides. Emitted whole (model +
             // mode categories together) so it never wipes a sibling category.
+            if let SessionEvent::AdapterSpecific { tag, payload } = &env.event
+                && tag == "service_tier"
+                && let Ok(snapshot) = serde_json::from_value::<aionui_session::ServiceTierSnapshot>(payload.clone())
+            {
+                if let Some(value) = snapshot.current_value.as_deref()
+                    && snapshot.options.iter().any(|option| option.value == value)
+                    && let Some(repo) = session_repo.as_ref()
+                {
+                    let _guard = runtime.selection_persist_lock.lock().await;
+                    persist_config_selection(repo.as_ref(), &user_id, &conversation_id, "service_tier", value).await;
+                }
+                if let Ok(mut fallback) = runtime.caps_fallback.lock() {
+                    fallback.service_tier = Some(snapshot);
+                }
+                if let Some((modes, models)) = runtime.last_catalog() {
+                    emit_config_options_snapshot(&modes, &models, &runtime);
+                }
+                continue;
+            }
             if let SessionEvent::CatalogUpdated {
                 models,
                 modes,
@@ -3496,6 +3617,50 @@ fn is_dead_resume_anchor(event: &SessionEvent) -> bool {
         message: result_text.clone(),
     };
     is_unrecoverable_resume_error(&reason)
+}
+
+/// Merge one selection while the caller holds the session persistence lock.
+async fn persist_config_selection(
+    repo: &dyn IAcpSessionRepository,
+    user_id: &str,
+    conversation_id: &str,
+    key: &str,
+    value: &str,
+) {
+    // Merge into the existing selection map (preserve unrelated keys).
+    let mut selections: std::collections::HashMap<String, String> = match repo
+        .load_runtime_state_for_user(user_id, conversation_id)
+        .await
+    {
+        Ok(Some(state)) => state
+            .config_selections_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_default(),
+        Ok(None) => std::collections::HashMap::new(),
+        Err(err) => {
+            tracing::warn!(conversation_id, error = %err, "persist_config_selection: load_runtime_state failed; skipping selection persist");
+            return;
+        }
+    };
+    selections.insert(key.to_owned(), value.to_owned());
+    let json = match serde_json::to_string(&selections) {
+        Ok(j) => j,
+        Err(err) => {
+            tracing::warn!(conversation_id, error = %err, "persist_config_selection: encode config_selections failed");
+            return;
+        }
+    };
+    let params = SaveRuntimeStateParams {
+        config_selections_json: Some(Some(&json)),
+        ..Default::default()
+    };
+    if let Err(err) = repo
+        .save_runtime_state_for_user(user_id, conversation_id, &params)
+        .await
+    {
+        tracing::warn!(conversation_id, error = %err, "persist_config_selection: save_runtime_state failed");
+    }
 }
 
 /// Persist the backend-observed session identity + config to `acp_session`, the
@@ -4438,10 +4603,11 @@ fn translate_event(event: SessionEvent, conversation_id: &str, terminal_result_s
                 "questions": questions,
             }))]
         }
-        // The FSM counter side is handled by the reducer; the frontend closes the
-        // card on its own answer. A cross-client "someone else answered" push is a
-        // follow-up (the recovery REST path re-lists open asks on reload).
-        SessionEvent::AskResolved { .. } => Vec::new(),
+        // Resolve the card on every client, including server retraction and answers
+        // delivered by another window; never leave a stale actionable question.
+        SessionEvent::AskResolved { request_id } => vec![AgentStreamEvent::AskResolved(serde_json::json!({
+            "session_id": conversation_id, "request_id": request_id,
+        }))],
         // Per-turn usage/cost → the AcpContextUsage passthrough frame the frontend
         // usage indicator reads (shape: cumulative token counters).
         SessionEvent::UsageDelta {
@@ -4670,6 +4836,62 @@ mod build_mapping_tests {
             None,
             "a snapshot without a cost figure must not seed"
         );
+    }
+
+    #[test]
+    fn service_tier_restore_reconciles_obsolete_saved_fast() {
+        let standard = aionui_session::ServiceTierOption {
+            value: "standard".into(),
+            name: "Standard".into(),
+            description: None,
+        };
+        let mut snapshot = aionui_session::ServiceTierSnapshot {
+            model_id: "standard-only".into(),
+            current_value: Some("standard".into()),
+            options: vec![standard],
+        };
+        assert_eq!(
+            restored_service_tier("priority", Some(&snapshot)).as_deref(),
+            Some("standard")
+        );
+        assert_eq!(
+            restored_service_tier("standard", Some(&snapshot)).as_deref(),
+            Some("standard")
+        );
+        snapshot.current_value = None;
+        assert_eq!(
+            restored_service_tier("priority", Some(&snapshot)).as_deref(),
+            Some("standard")
+        );
+        assert_eq!(restored_service_tier("priority", None), None);
+        snapshot.options.push(aionui_session::ServiceTierOption {
+            value: "priority".into(),
+            name: "Fast".into(),
+            description: None,
+        });
+        assert_eq!(
+            restored_service_tier("priority", Some(&snapshot)).as_deref(),
+            Some("priority")
+        );
+    }
+
+    #[test]
+    fn service_tier_restores_confirmed_selection_before_creation_seed() {
+        let mut config = AcpBuildExtra::default();
+        config
+            .pending_config_options
+            .insert("service_tier".into(), "priority".into());
+        assert_eq!(resolved_service_tier(&config, None).as_deref(), Some("priority"));
+        let mut snapshot = PersistedSessionState::default();
+        snapshot.config_selections.insert(
+            crate::shared_kernel::ConfigKey::new("service_tier"),
+            crate::shared_kernel::ConfigValue::new("standard"),
+        );
+        assert_eq!(
+            resolved_service_tier(&config, Some(&snapshot)).as_deref(),
+            Some("standard")
+        );
+        assert_eq!(resolved_service_tier(&AcpBuildExtra::default(), None), None);
     }
 
     #[test]
@@ -6379,8 +6601,66 @@ mod persist_tests {
         assert_eq!(state.current_model_id.as_deref(), Some("claude-opus-4-8"));
     }
 
-    // #4: a `set_config_option("effort", ...)` must persist the level into
-    // config_selections — claude emits NO ConfigChanged for effort, so unless
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn service_tier_observation_persists_model_reset() {
+        use futures_util::StreamExt;
+        let (repo, _db) = seeded_repo().await;
+        let task = SessionAgentTask::new(
+            AgentType::Acp,
+            "conv-1".into(),
+            "user-1".into(),
+            "/w".into(),
+            Arc::new(super::pump_tests::StaticCapsBackend),
+            Some(repo.clone()),
+        );
+        task.persist_config_selection("service_tier", "priority").await;
+        task.persist_config_selection(EFFORT_CONFIG_KEY, "high").await;
+        let snapshot = aionui_session::ServiceTierSnapshot {
+            model_id: "standard-only".into(),
+            current_value: Some("standard".into()),
+            options: vec![aionui_session::ServiceTierOption {
+                value: "standard".into(),
+                name: "Standard".into(),
+                description: None,
+            }],
+        };
+        let event = SessionEnvelope {
+            session_id: "conv-1".into(),
+            turn_gen: 0,
+            event: SessionEvent::AdapterSpecific {
+                tag: "service_tier".into(),
+                payload: serde_json::to_value(snapshot).unwrap(),
+            },
+        };
+        spawn_event_pump(
+            futures_util::stream::iter(vec![event]).boxed(),
+            task.runtime.clone(),
+            "conv-1".into(),
+            "user-1".into(),
+            Some(repo.clone()),
+            None,
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let state = repo
+                    .load_runtime_state_for_user("user-1", "conv-1")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let values: serde_json::Value =
+                    serde_json::from_str(state.config_selections_json.as_deref().unwrap()).unwrap();
+                if values["service_tier"] == "standard" {
+                    assert_eq!(values[EFFORT_CONFIG_KEY], "high");
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("model-reset observation must replace saved Fast");
+    }
+
+    // #4: persist effort into config_selections. Claude emits no effort echo, so unless
     // set_config_option writes it directly, effort is lost across respawn/resume.
     // This drives the real chokepoint (a task built around a NoStreamBackend + the
     // seeded repo) and asserts the level lands in the persisted config_selections.

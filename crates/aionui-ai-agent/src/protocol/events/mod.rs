@@ -47,6 +47,8 @@ pub enum AgentStreamEvent {
     /// Answered via the confirm channel with the FULL per-question answer set;
     /// wire tag `ask`.
     Ask(serde_json::Value),
+    /// Correlated question resolution (answer or server retraction).
+    AskResolved(serde_json::Value),
     SkillSuggest(SkillSuggestEventData),
     CronTrigger(CronTriggerEventData),
     AcpModelInfo(serde_json::Value),
