@@ -1,0 +1,67 @@
+name: LayaAir ACPCore macOS fallback
+on:
+  push:
+    branches: [codex/macos-runner-fallback]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  darwin-arm64:
+    runs-on: macos-15-intel
+    env:
+      ACPCORE_SOURCE_COMMIT: d3e0783ef6fb0f7412b73d209e3f02cb78242d1c
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.ACPCORE_SOURCE_COMMIT }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.95.0'
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-intel-to-arm64
+      - run: cargo test -p aionui-session --lib service_tier --locked
+      - run: cargo test -p aionui-session --lib codex_questions --locked
+      - run: cargo test -p aionui-ai-agent --lib service_tier --locked
+      - name: Cross-build the pinned ARM64 runtime
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: 'none'
+        run: cargo build --release --target aarch64-apple-darwin --bin aioncore --locked
+      - name: Verify architecture and record source provenance
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          import hashlib, json, os, pathlib, shutil, struct, subprocess
+          source = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          assert source == os.environ["ACPCORE_SOURCE_COMMIT"]
+          subprocess.run(["git", "diff", "--exit-code"], check=True)
+          binary = pathlib.Path("target/aarch64-apple-darwin/release/aioncore")
+          with binary.open("rb") as stream:
+              header = stream.read(8)
+          assert header[:4] == b"\xcf\xfa\xed\xfe"
+          assert struct.unpack_from("<I", header, 4)[0] == 0x0100000c
+          out = pathlib.Path("release-artifact")
+          out.mkdir()
+          shutil.copy2(binary, out / "aioncore")
+          provenance = {
+              "schemaVersion": 1,
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "sourceCommit": source,
+              "workflowCommit": os.environ["GITHUB_SHA"],
+              "workflowRun": "https://github.com/" + os.environ["GITHUB_REPOSITORY"] + "/actions/runs/" + os.environ["GITHUB_RUN_ID"],
+              "platform": "darwin-arm64",
+              "target": "aarch64-apple-darwin",
+              "compiler": subprocess.check_output(["rustc", "--version"], text=True).strip(),
+              "binarySha256": hashlib.file_digest(binary.open("rb"), "sha256").hexdigest(),
+          }
+          (out / "BUILD_PROVENANCE.json").write_text(json.dumps(provenance, indent=2) + "\n")
+          print(json.dumps(provenance, indent=2))
+          PYCODE
+          file target/aarch64-apple-darwin/release/aioncore
+          otool -L target/aarch64-apple-darwin/release/aioncore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acp-core-darwin-arm64-${{ env.ACPCORE_SOURCE_COMMIT }}
+          path: release-artifact/
+          if-no-files-found: error
