@@ -741,6 +741,7 @@ impl SessionAgentTask {
                     options
                 };
                 aionui_common::Confirmation {
+                    mcp_server_name: if is_ask { None } else { p.mcp_server_name },
                     id: p.request_id.clone(),
                     call_id: p.request_id,
                     title: (!p.tool_name.is_empty()).then(|| p.tool_name.clone()),
@@ -9651,6 +9652,7 @@ mod pump_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_confirmations_recovers_pending_ask_user_question() {
         let backend: Arc<dyn SessionBackend> = Arc::new(PendingPermBackend(aionui_session::PendingPermissionView {
+            mcp_server_name: None,
             request_id: "req-recover".into(),
             tool_name: "AskUserQuestion".into(),
             // The BARE questions[] array — matching what claude_conn's
@@ -9686,10 +9688,36 @@ mod pump_tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_confirmations_recovers_mcp_identity_without_tool_input() {
+        let backend: Arc<dyn SessionBackend> = Arc::new(PendingPermBackend(aionui_session::PendingPermissionView {
+            mcp_server_name: Some("identity_probe".into()),
+            request_id: "elicit:0".into(),
+            tool_name: "Elicitation".into(),
+            questions: None,
+        }));
+        let task = SessionAgentTask::new(
+            AgentType::Acp,
+            "conv-1".into(),
+            "user-1".into(),
+            "/w".into(),
+            backend,
+            None,
+        );
+        let recovered = task.get_confirmations();
+        assert_eq!(recovered.len(), 1);
+        let json = serde_json::to_value(&recovered[0]).unwrap();
+        assert_eq!(json["mcp_server_name"], "identity_probe");
+        assert_eq!(json["call_id"], "elicit:0");
+        assert!(json.get("raw_input").is_none());
+        assert!(json.get("questions").is_none());
+    }
+
     // A pending ordinary tool permission recovers as the generic allow/deny card.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_confirmations_recovers_generic_permission() {
         let backend: Arc<dyn SessionBackend> = Arc::new(PendingPermBackend(aionui_session::PendingPermissionView {
+            mcp_server_name: None,
             request_id: "req-tool".into(),
             tool_name: "Bash".into(),
             questions: None,

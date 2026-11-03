@@ -12,11 +12,16 @@ use std::collections::{HashMap, HashSet};
 
 #[derive(Clone)]
 pub(super) enum PendingCodexRequest {
-    Approval(String),
+    Approval {
+        title: String,
+        mcp_server_name: Option<String>,
+    },
     Question(CodexQuestionRequest),
     // Kept until serverRequest/resolved to absorb the server's acknowledgement
     // without decrementing either the question or permission counter twice.
-    AnsweredQuestion { wire_id: Value },
+    AnsweredQuestion {
+        wire_id: Value,
+    },
 }
 
 impl PendingCodexRequest {
@@ -24,7 +29,7 @@ impl PendingCodexRequest {
         match self {
             Self::Question(request) => Some(&request.wire_id),
             Self::AnsweredQuestion { wire_id } => Some(wire_id),
-            Self::Approval(_) => None,
+            Self::Approval { .. } => None,
         }
     }
 }

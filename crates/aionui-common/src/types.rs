@@ -50,6 +50,9 @@ pub struct ProviderWithModel {
 /// A pending tool-call confirmation item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Confirmation {
+    /// Structured MCP identity for ordinary tool approval recovery. Never inferred from prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_server_name: Option<String>,
     pub id: String,
     pub call_id: String,
     pub title: Option<String>,
@@ -144,6 +147,7 @@ mod tests {
     #[test]
     fn test_confirmation_serde() {
         let c = Confirmation {
+            mcp_server_name: None,
             id: "c1".into(),
             call_id: "call1".into(),
             title: Some("Run command?".into()),
@@ -159,6 +163,7 @@ mod tests {
         };
         let json = serde_json::to_value(&c).unwrap();
         assert_eq!(json["call_id"], "call1");
+        assert!(json.get("mcp_server_name").is_none());
         assert_eq!(json["command_type"], "bash");
         assert!(
             json.get("questions").is_none(),

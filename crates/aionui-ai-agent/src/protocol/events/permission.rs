@@ -78,6 +78,7 @@ impl AcpPermissionEventData {
 impl AcpPermissionRequestData {
     pub fn to_confirmation(&self) -> Confirmation {
         Confirmation {
+            mcp_server_name: None,
             id: self.tool_call.tool_call_id.clone(),
             call_id: self.tool_call.tool_call_id.clone(),
             title: self.tool_call.title.clone(),

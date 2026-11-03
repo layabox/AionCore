@@ -33,6 +33,7 @@ impl BackendProtocolSink {
         let command_type = Some(category.to_string());
 
         Confirmation {
+            mcp_server_name: None,
             id: generate_id(),
             call_id: call_id.to_string(),
             title: Some(title),

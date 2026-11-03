@@ -1039,6 +1039,7 @@ impl SessionBackend for AntigravitySessionBackend {
         pending
             .iter()
             .map(|(request_id, entry)| PendingPermissionView {
+                mcp_server_name: None,
                 request_id: request_id.clone(),
                 tool_name: entry.tool_name.clone(),
                 // agy has no AskUserQuestion equivalent: every hook request is a

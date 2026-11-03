@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, codex/agent-launch-arguments, codex/agent-launch-arguments-verification]
+    branches: [codex/mcp-permission-identity, main, codex/agent-launch-arguments, codex/agent-launch-arguments-verification]
   pull_request:
     branches: [main]
 

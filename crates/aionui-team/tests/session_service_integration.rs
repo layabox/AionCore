@@ -1572,6 +1572,7 @@ fn confirmations_factory(count: usize) -> AgentFactory {
     Arc::new(move |opts: BuildTaskOptions| {
         let confirmations = (0..count)
             .map(|idx| Confirmation {
+                mcp_server_name: None,
                 id: format!("tool-{idx}"),
                 call_id: format!("tool-{idx}"),
                 title: None,

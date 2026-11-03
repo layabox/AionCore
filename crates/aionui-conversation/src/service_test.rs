@@ -4234,6 +4234,7 @@ async fn midturn_send_during_pending_confirmation_stays_409() {
         .expect("claim the active turn");
     let agent = Arc::new(MidturnMockAgent::new(&conv.id));
     *agent.confirmations.lock().unwrap() = vec![Confirmation {
+        mcp_server_name: None,
         id: "c1".into(),
         call_id: "call-1".into(),
         title: Some("Allow file edit".into()),
@@ -7377,6 +7378,7 @@ async fn warmup_keeps_generic_error_for_non_openclaw_gateway_signature() {
 fn make_test_confirmations() -> Vec<Confirmation> {
     vec![
         Confirmation {
+            mcp_server_name: None,
             id: "c1".into(),
             call_id: "call-1".into(),
             title: Some("Allow file edit".into()),
@@ -7387,6 +7389,7 @@ fn make_test_confirmations() -> Vec<Confirmation> {
             options: vec![],
         },
         Confirmation {
+            mcp_server_name: None,
             id: "c2".into(),
             call_id: "call-2".into(),
             title: Some("Read file".into()),

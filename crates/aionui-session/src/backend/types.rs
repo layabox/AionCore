@@ -174,10 +174,12 @@ pub struct QuestionAnswer {
 /// Read-only snapshot of ONE currently-open (unanswered) permission request, for
 /// REST recovery (`GET /confirmations`) of a reloaded `waiting_confirmation`
 /// conversation. Transient adapter-side state — NOT reducer/FSM/persisted. Carries
-/// only the safe correlation + title surface (`request_id`/`tool_name`); the raw
+/// only safe correlation, title and ordinary-MCP identity metadata; the raw
 /// tool `input` (command body / args) is deliberately NOT exposed (TIO-13).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingPermissionView {
+    /// Server identity only for ordinary MCP tool approvals, never interactive elicitations.
+    pub mcp_server_name: Option<String>,
     /// The control correlation key (claude `request_id`); the recovery card's
     /// id == call_id == this, matching the live `ConfirmationAdded` path.
     pub request_id: String,

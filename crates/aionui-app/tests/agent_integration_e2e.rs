@@ -505,6 +505,46 @@ async fn runtime_ensure_with_mock_agent() {
 // ── Confirmation system with mock agent ─────────────────────────
 
 #[tokio::test]
+async fn list_confirmations_preserves_mcp_identity_without_raw_tool_input() {
+    let (mut app, services, mock_tm) = build_app_with_mock_tasks().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
+    let conv_id = create_conversation(&mut app, &token, &csrf, "MCP Identity").await;
+    let agent = mock_tm.insert(&conv_id, "/mock-workspace");
+    agent.confirmations.lock().unwrap().push(Confirmation {
+        mcp_server_name: Some("identity_probe".into()),
+        id: "elicit:0".into(),
+        call_id: "elicit:0".into(),
+        title: Some("Elicitation".into()),
+        action: None,
+        description: String::new(),
+        command_type: None,
+        questions: None,
+        options: vec![],
+    });
+    let unauthorized = app
+        .clone()
+        .oneshot(get_with_token(
+            &format!("/api/conversations/{conv_id}/confirmations"),
+            "invalid-token",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    let response = app
+        .oneshot(get_with_token(
+            &format!("/api/conversations/{conv_id}/confirmations"),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_json(response).await;
+    assert_eq!(body["data"][0]["mcp_server_name"], "identity_probe");
+    assert_eq!(body["data"][0]["call_id"], "elicit:0");
+    assert!(body["data"][0].get("raw_input").is_none());
+}
+
+#[tokio::test]
 async fn list_confirmations_empty() {
     let (mut app, services, mock_tm) = build_app_with_mock_tasks().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
@@ -529,6 +569,7 @@ async fn confirm_and_check_approval() {
 
     // Pre-populate a pending confirmation so the confirm endpoint can find it
     agent.confirmations.lock().unwrap().push(Confirmation {
+        mcp_server_name: None,
         questions: None,
         id: "conf-1".into(),
         call_id: "call-42".into(),

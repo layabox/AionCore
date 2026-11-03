@@ -3545,6 +3545,7 @@ impl SessionBackend for ClaudeSessionBackend {
                     None
                 };
                 PendingPermissionView {
+                    mcp_server_name: None,
                     request_id: request_id.clone(),
                     tool_name: perm.tool_name.clone(),
                     questions,

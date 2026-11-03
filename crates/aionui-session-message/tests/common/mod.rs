@@ -433,6 +433,7 @@ impl Ctx {
             .try_claim_turn(id, "turn_active")
             .expect("claim the active turn");
         let agent = Arc::new(FakeAgent::new(id, true).with_pending_confirmation(Confirmation {
+            mcp_server_name: None,
             id: "confirm_1".to_owned(),
             call_id: "call_1".to_owned(),
             title: Some("Allow shell?".to_owned()),

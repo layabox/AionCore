@@ -282,6 +282,7 @@ mod tests {
 
     fn sample_confirmation(call_id: &str) -> Confirmation {
         Confirmation {
+            mcp_server_name: None,
             id: call_id.to_owned(),
             call_id: call_id.to_owned(),
             questions: None,

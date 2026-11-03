@@ -2737,7 +2737,7 @@ fn resolve_codex_questions(
         pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, entry| matches!(entry, PendingCodexRequest::Approval(_)));
+            .retain(|_, entry| matches!(entry, PendingCodexRequest::Approval { .. }));
     }
     for (request_id, generation) in resolved {
         emit(
@@ -2759,6 +2759,25 @@ fn remove_pending_tool_approval(pending: &PendingCodexRequests, request_id: &str
     if map.remove(request_id).is_none() {
         map.remove(&format!("{ELICIT_PREFIX}{request_id}"));
     }
+}
+
+/// Identify ordinary MCP tool approval from the native structured marker, never prose.
+/// Verified: docs/protocol-schemas/codex-0.166.0-alpha.5.1/mcp-tool-approval.json.
+/// Other forms and URL/verification flows must remain interactive.
+fn mcp_tool_approval_server(input: &Value) -> Option<String> {
+    let mode = input.get("mode")?.as_str()?;
+    if mode != "form" || input.pointer("/_meta/codex_approval_kind").and_then(Value::as_str) != Some("mcp_tool_call") {
+        return None;
+    }
+    let properties = input.get("requestedSchema")?.get("properties")?.as_object()?;
+    if !properties.is_empty() {
+        return None;
+    }
+    input
+        .get("serverName")?
+        .as_str()
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_owned)
 }
 
 /// Reverse-RPC handler (A2/A3). The blocking ServerRequest MUST eventually get a
@@ -2851,10 +2870,13 @@ async fn handle_reverse_rpc(
             } else {
                 "CommandExecution"
             };
-            pending_tool_approvals
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(request_id.clone(), PendingCodexRequest::Approval(title.to_string()));
+            pending_tool_approvals.lock().unwrap_or_else(|e| e.into_inner()).insert(
+                request_id.clone(),
+                PendingCodexRequest::Approval {
+                    title: title.to_string(),
+                    mcp_server_name: None,
+                },
+            );
             emit(
                 event_tx,
                 session_id,
@@ -2896,13 +2918,19 @@ async fn handle_reverse_rpc(
                 "requestedSchema": frame.get("params").and_then(|p| p.get("requestedSchema")),
                 "mode": frame.get("params").and_then(|p| p.get("mode")),
                 "serverName": frame.get("params").and_then(|p| p.get("serverName")),
+                "_meta": frame.get("params").and_then(|p| p.get("_meta")),
             });
             // Register for REST recovery, keyed by the ELICIT_PREFIX-tagged request_id
             // (the same id we surface + dispatch(AnswerPermission) answers). Title is
             // the safe approval class, not the elicitation message body (TIO-13).
+            // Keep only the structured Server identity in recovery; tool parameters
+            // remain confined to the transient live permission event.
             pending_tool_approvals.lock().unwrap_or_else(|e| e.into_inner()).insert(
                 request_id.clone(),
-                PendingCodexRequest::Approval("Elicitation".to_string()),
+                PendingCodexRequest::Approval {
+                    title: "Elicitation".to_string(),
+                    mcp_server_name: mcp_tool_approval_server(&input),
+                },
             );
             emit(
                 event_tx,
@@ -4974,19 +5002,22 @@ impl SessionBackend for CodexSessionBackend {
     /// card's id==call_id==request_id, matching the live `Permission` frame so a
     /// duplicate live+recovered pair de-dups. Native questions carry the same
     /// normalized questions as the live Ask frame; answered questions are excluded;
-    /// the raw command body is NOT exposed (TIO-13) — only the approval-class title.
+    /// the raw command body is NOT exposed (TIO-13). Only the approval-class
+    /// title and verified ordinary-MCP Server identity are retained.
     fn pending_permission_requests(&self) -> Vec<PendingPermissionView> {
         self.pending_tool_approvals
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter_map(|(request_id, request)| match request {
-                PendingCodexRequest::Approval(title) => Some(PendingPermissionView {
+                PendingCodexRequest::Approval { title, mcp_server_name } => Some(PendingPermissionView {
+                    mcp_server_name: mcp_server_name.clone(),
                     request_id: request_id.clone(),
                     tool_name: title.clone(),
                     questions: None,
                 }),
                 PendingCodexRequest::Question(request) => Some(PendingPermissionView {
+                    mcp_server_name: None,
                     request_id: request_id.clone(),
                     tool_name: "AskUserQuestion".into(),
                     questions: Some(request.card()),
@@ -6317,6 +6348,74 @@ mod tests {
             _ => None,
         });
         assert!(got.is_some_and(|d| d.contains("diff --git")), "got {events:?}");
+    }
+
+    #[test]
+    fn mcp_tool_approval_identity_requires_the_native_marker_and_empty_form() {
+        let frame: Value = serde_json::from_str(include_str!(
+            "../../../../docs/protocol-schemas/codex-0.166.0-alpha.5.1/mcp-tool-approval.json"
+        ))
+        .unwrap();
+        let input = &frame["params"];
+        assert_eq!(mcp_tool_approval_server(input).as_deref(), Some("identity_probe"));
+        for mode in ["url", "openai/userVerification", "unknown"] {
+            let mut altered = input.clone();
+            altered["mode"] = json!(mode);
+            assert_eq!(mcp_tool_approval_server(&altered), None);
+        }
+        for properties in [json!({"answer": {"type": "string"}}), Value::Null, json!([])] {
+            let mut altered = input.clone();
+            altered["requestedSchema"]["properties"] = properties;
+            assert_eq!(mcp_tool_approval_server(&altered), None);
+        }
+        let mut missing_marker = input.clone();
+        missing_marker.as_object_mut().unwrap().remove("_meta");
+        assert_eq!(mcp_tool_approval_server(&missing_marker), None);
+        let mut missing_name = input.clone();
+        missing_name["serverName"] = json!(" ");
+        assert_eq!(mcp_tool_approval_server(&missing_name), None);
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_approval_identity_survives_pending_recovery_and_clears_on_answer() {
+        let frame = include_str!("../../../../docs/protocol-schemas/codex-0.166.0-alpha.5.1/mcp-tool-approval.json");
+        let frame: Value = serde_json::from_str(frame).unwrap();
+        let bytes = format!("{}\n", frame).into_bytes();
+        let fake = FakeAgentIo::never_exits(Vec::new()).with_gated_tail(bytes);
+        let releaser = fake.stdout_releaser();
+        let captured = fake.captured_stdin();
+        let backend = CodexSessionBackend::build_with_io("mcp-recovery", Box::new(fake)).await;
+        let mut events = backend.events();
+        releaser();
+        let request_id = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while let Some(env) = events.next().await {
+                if let SessionEvent::Permission { request_id, input, .. } = env.event {
+                    assert_eq!(input.unwrap()["serverName"], "identity_probe");
+                    return request_id;
+                }
+            }
+            panic!("permission event missing");
+        })
+        .await
+        .unwrap();
+        let pending = backend.pending_permission_requests();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].request_id, request_id);
+        assert_eq!(pending[0].mcp_server_name.as_deref(), Some("identity_probe"));
+        assert!(pending[0].questions.is_none());
+        backend
+            .dispatch(Command::AnswerPermission {
+                request_id,
+                decision: crate::PermissionDecision::Approved,
+                selected: None,
+                answers: vec![],
+            })
+            .await
+            .unwrap();
+        assert!(backend.pending_permission_requests().is_empty());
+        let written = captured_str(&captured).await;
+        assert!(written.contains(r#""action":"accept""#));
+        assert!(!written.contains("acceptForSession"));
     }
 
     #[tokio::test]

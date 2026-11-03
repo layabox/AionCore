@@ -1,7 +1,7 @@
 name: LayaAir ACPCore runtime
 on:
   push:
-    branches: [codex/fast-mode, codex/request-user-input, codex/agent-launch-arguments]
+    branches: [codex/mcp-permission-identity, codex/fast-mode, codex/request-user-input, codex/agent-launch-arguments]
   workflow_dispatch:
 permissions:
   contents: read
@@ -37,6 +37,8 @@ jobs:
       - run: cargo test -p aionui-session --lib codex_questions --locked
       - run: cargo test -p aionui-session --lib spawner --locked
       - run: cargo test -p aionui-ai-agent --lib service_tier --locked
+      - run: cargo test -p aionui-session --lib mcp_tool_approval_identity --locked
+      - run: cargo test -p aionui-ai-agent --lib get_confirmations_recovers_mcp_identity --locked
       - name: Build release runtime
         env:
           CARGO_PROFILE_RELEASE_STRIP: 'none'
