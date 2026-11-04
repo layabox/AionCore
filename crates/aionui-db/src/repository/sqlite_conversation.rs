@@ -216,7 +216,7 @@ impl SqliteConversationRepository {
                 WHERE c.user_id = ? \
                   AND m.conversation_id = ? \
                   AND (m.created_at < ? OR (m.created_at = ? AND m.id < ?)) \
-                  AND m.type NOT IN ('cron_trigger', 'skill_suggest') \
+                  AND m.type NOT IN ('cron_trigger', 'skill_suggest', 'acp_goal') \
              )",
         )
         .bind(user_id)
@@ -243,7 +243,7 @@ impl SqliteConversationRepository {
                 WHERE c.user_id = ? \
                   AND m.conversation_id = ? \
                   AND (m.created_at > ? OR (m.created_at = ? AND m.id > ?)) \
-                  AND m.type NOT IN ('cron_trigger', 'skill_suggest') \
+                  AND m.type NOT IN ('cron_trigger', 'skill_suggest', 'acp_goal') \
              )",
         )
         .bind(user_id)
@@ -780,7 +780,7 @@ impl IConversationRepository for SqliteConversationRepository {
                INNER JOIN conversations c ON c.id = m.conversation_id \
                WHERE c.user_id = ? \
                  AND m.conversation_id = ? \
-                 AND m.type = ? \
+                 AND m.type = ? AND m.type != 'acp_goal' \
                ORDER BY m.created_at DESC, m.id DESC \
                LIMIT 1",
         )
@@ -809,7 +809,7 @@ impl IConversationRepository for SqliteConversationRepository {
                       INNER JOIN conversations c ON c.id = m.conversation_id \
                       WHERE c.user_id = ? \
                         AND m.conversation_id = ? \
-                        AND m.type NOT IN ('cron_trigger', 'skill_suggest') \
+                        AND m.type NOT IN ('cron_trigger', 'skill_suggest', 'acp_goal') \
                       ORDER BY m.created_at DESC, m.id DESC \
                       LIMIT ?",
                 )
@@ -829,7 +829,7 @@ impl IConversationRepository for SqliteConversationRepository {
                       WHERE c.user_id = ? \
                         AND m.conversation_id = ? \
                         AND (m.created_at < ? OR (m.created_at = ? AND m.id < ?)) \
-                        AND m.type NOT IN ('cron_trigger', 'skill_suggest') \
+                        AND m.type NOT IN ('cron_trigger', 'skill_suggest', 'acp_goal') \
                       ORDER BY m.created_at DESC, m.id DESC \
                       LIMIT ?",
                 )
@@ -852,7 +852,7 @@ impl IConversationRepository for SqliteConversationRepository {
                       WHERE c.user_id = ? \
                         AND m.conversation_id = ? \
                         AND (m.created_at > ? OR (m.created_at = ? AND m.id > ?)) \
-                        AND m.type NOT IN ('cron_trigger', 'skill_suggest') \
+                        AND m.type NOT IN ('cron_trigger', 'skill_suggest', 'acp_goal') \
                       ORDER BY m.created_at ASC, m.id ASC \
                       LIMIT ?",
                 )
@@ -874,7 +874,7 @@ impl IConversationRepository for SqliteConversationRepository {
                      WHERE c.user_id = ? \
                        AND m.conversation_id = ? \
                        AND m.id = ? \
-                       AND m.type NOT IN ('cron_trigger', 'skill_suggest')",
+                       AND m.type NOT IN ('cron_trigger', 'skill_suggest', 'acp_goal')",
                 )
                 .bind(user_id)
                 .bind(conv_id)
@@ -890,7 +890,7 @@ impl IConversationRepository for SqliteConversationRepository {
                       WHERE c.user_id = ? \
                         AND m.conversation_id = ? \
                         AND (m.created_at < ? OR (m.created_at = ? AND m.id < ?)) \
-                        AND m.type NOT IN ('cron_trigger', 'skill_suggest') \
+                        AND m.type NOT IN ('cron_trigger', 'skill_suggest', 'acp_goal') \
                       ORDER BY m.created_at DESC, m.id DESC \
                       LIMIT ?",
                 )
@@ -910,7 +910,7 @@ impl IConversationRepository for SqliteConversationRepository {
                       WHERE c.user_id = ? \
                         AND m.conversation_id = ? \
                         AND (m.created_at > ? OR (m.created_at = ? AND m.id > ?)) \
-                        AND m.type NOT IN ('cron_trigger', 'skill_suggest') \
+                        AND m.type NOT IN ('cron_trigger', 'skill_suggest', 'acp_goal') \
                       ORDER BY m.created_at ASC, m.id ASC \
                       LIMIT ?",
                 )
@@ -955,7 +955,7 @@ impl IConversationRepository for SqliteConversationRepository {
              WHERE c.user_id = ? \
                AND m.conversation_id = ? \
                AND m.id = ? \
-               AND m.type NOT IN ('cron_trigger', 'skill_suggest')",
+               AND m.type NOT IN ('cron_trigger', 'skill_suggest', 'acp_goal')",
         )
         .bind(user_id)
         .bind(conv_id)
@@ -1260,7 +1260,7 @@ impl IConversationRepository for SqliteConversationRepository {
         let count_row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM messages m \
              INNER JOIN conversations c ON m.conversation_id = c.id \
-             WHERE c.user_id = ? AND m.content LIKE ?",
+             WHERE c.user_id = ? AND m.content LIKE ? AND m.type != 'acp_goal'",
         )
         .bind(user_id)
         .bind(&like_pattern)
@@ -1288,7 +1288,7 @@ impl IConversationRepository for SqliteConversationRepository {
                 c.updated_at AS conversation_updated_at \
              FROM messages m \
              INNER JOIN conversations c ON m.conversation_id = c.id \
-             WHERE c.user_id = ? AND m.content LIKE ? \
+             WHERE c.user_id = ? AND m.content LIKE ? AND m.type != 'acp_goal' \
              ORDER BY m.created_at DESC \
              LIMIT ? OFFSET ?",
         )

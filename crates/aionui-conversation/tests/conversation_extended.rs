@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use aionui_ai_agent::{AgentError, IWorkerTaskManager};
 use aionui_api_types::{
-    CloneConversationRequest, CreateConversationRequest, ListMessagesQuery, SearchMessagesQuery, WebSocketMessage,
+    CloneConversationRequest, ConversationGoalSnapshot, CreateConversationRequest, ListMessagesQuery,
+    SearchMessagesQuery, WebSocketMessage,
 };
 use aionui_common::{AgentKillReason, ConversationStatus, TimestampMs, generate_prefixed_id, now_ms};
 use aionui_conversation::skill_resolver::SkillResolver;
@@ -105,6 +106,178 @@ async fn setup() -> (
 }
 
 const USER_ID: &str = "system_default_user";
+
+#[tokio::test]
+async fn goal_metadata_is_excluded_from_history_and_search() {
+    // State can precede, split, or follow chat rows. It must not consume a page
+    // slot or affect continuation flags, including after the Goal is cleared.
+    for goal_created_at in [500, 1500, 3500] {
+        let (svc, repo, _bus) = setup().await;
+        let conversation = svc.create(USER_ID, make_create_req()).await.unwrap();
+        let goal_id = format!("{}:goal", conversation.id);
+        let snapshot: ConversationGoalSnapshot = serde_json::from_value(json!({
+            "revision":100,
+            "goal": {
+                "objective":"shared-needle goal-only-needle", "status":"paused", "tokenBudget":1000,
+                "tokensUsed":0, "timeUsedSeconds":0, "createdAt":1793790978, "updatedAt":1793790978
+            }
+        }))
+        .unwrap();
+        let mut state = MessageRow {
+            id: goal_id.clone(),
+            conversation_id: conversation.id.clone(),
+            msg_id: Some(goal_id.clone()),
+            r#type: "acp_goal".into(),
+            content: serde_json::to_string(&snapshot).unwrap(),
+            position: Some("center".into()),
+            status: Some("finish".into()),
+            hidden: true,
+            created_at: goal_created_at,
+            backend_turn_id: None,
+        };
+        repo.insert_message(USER_ID, &state).await.unwrap();
+        for mode in ["full", "compact"] {
+            let empty = svc
+                .list_messages(
+                    USER_ID,
+                    &conversation.id,
+                    ListMessagesQuery {
+                        limit: Some(1),
+                        content_mode: Some(mode.into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(empty.items.is_empty());
+            assert!(!empty.has_more_before && !empty.has_more_after);
+            assert!(empty.oldest_cursor.is_none() && empty.newest_cursor.is_none());
+        }
+        for (id, created_at) in [("visible-1", 1000), ("visible-2", 2000)] {
+            let mut message = make_message(&conversation.id, "shared-needle", 0);
+            message.id = id.into();
+            message.created_at = created_at;
+            repo.insert_message(USER_ID, &message).await.unwrap();
+        }
+        for saved in [
+            snapshot,
+            ConversationGoalSnapshot {
+                goal: None,
+                revision: 101,
+            },
+        ] {
+            state.content = serde_json::to_string(&saved).unwrap();
+            repo.upsert_message(USER_ID, &state).await.unwrap();
+            for mode in ["full", "compact"] {
+                let latest = svc
+                    .list_messages(
+                        USER_ID,
+                        &conversation.id,
+                        ListMessagesQuery {
+                            limit: Some(1),
+                            content_mode: Some(mode.into()),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(latest.items.len(), 1);
+                assert_eq!(latest.items[0].id, "visible-2");
+                assert!(latest.has_more_before && !latest.has_more_after);
+                let first = svc
+                    .list_messages(
+                        USER_ID,
+                        &conversation.id,
+                        ListMessagesQuery {
+                            limit: Some(1),
+                            content_mode: Some(mode.into()),
+                            before: latest.oldest_cursor,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(first.items.len(), 1);
+                assert_eq!(first.items[0].id, "visible-1");
+                assert!(!first.has_more_before && first.has_more_after);
+                let next = svc
+                    .list_messages(
+                        USER_ID,
+                        &conversation.id,
+                        ListMessagesQuery {
+                            limit: Some(1),
+                            content_mode: Some(mode.into()),
+                            after: first.newest_cursor,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(next.items.len(), 1);
+                assert_eq!(next.items[0].id, "visible-2");
+                assert!(next.has_more_before && !next.has_more_after);
+                for (anchor, limit, ids, has_before, has_after) in [
+                    ("visible-1", 1, vec!["visible-1"], false, true),
+                    ("visible-2", 1, vec!["visible-2"], true, false),
+                    ("visible-1", 3, vec!["visible-1", "visible-2"], false, false),
+                    ("visible-2", 3, vec!["visible-1", "visible-2"], false, false),
+                ] {
+                    let page = svc
+                        .list_messages(
+                            USER_ID,
+                            &conversation.id,
+                            ListMessagesQuery {
+                                limit: Some(limit),
+                                content_mode: Some(mode.into()),
+                                anchor_message_id: Some(anchor.into()),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(page.items.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), ids);
+                    assert_eq!(page.has_more_before, has_before);
+                    assert_eq!(page.has_more_after, has_after);
+                }
+            }
+            assert_eq!(
+                serde_json::to_value(svc.get_goal(USER_ID, &conversation.id).await.unwrap()).unwrap(),
+                serde_json::to_value(&saved).unwrap()
+            );
+            assert!(
+                svc.latest_message_of_type(USER_ID, &conversation.id, "acp_goal")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                matches!(svc.get_message(USER_ID, &conversation.id, &goal_id).await.unwrap_err(),
+                ConversationError::MessageNotFound { id } if id == goal_id)
+            );
+            for (keyword, count) in [("shared-needle", 2), ("goal-only-needle", 0)] {
+                let matches = svc
+                    .search_messages(
+                        USER_ID,
+                        SearchMessagesQuery {
+                            keyword: keyword.into(),
+                            page: None,
+                            page_size: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(matches.total, count);
+                assert_eq!(matches.items.len() as u64, count);
+            }
+        }
+        assert!(matches!(
+            svc.list_messages("foreign-user", &conversation.id, ListMessagesQuery::default())
+                .await
+                .unwrap_err(),
+            ConversationError::NotFound { .. }
+        ));
+    }
+}
 
 fn ensure_test_workspace_path() -> String {
     ensure_named_workspace_path("aionui-conversation-extended-test-project")

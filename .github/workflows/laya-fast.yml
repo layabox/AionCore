@@ -43,6 +43,7 @@ jobs:
         run: Remove-Item 'C:\Program Files\Git\usr\bin\link.exe' -Force -ErrorAction SilentlyContinue
       - run: cargo test -p aionui-session --lib native_goal --locked
       - run: cargo test -p aionui-conversation --lib goal_ --locked
+      - run: cargo test -p aionui-conversation --test conversation_extended goal_metadata --locked
       - run: cargo test -p aionui-session --lib service_tier --locked
       - run: cargo test -p aionui-session --lib codex_questions --locked
       - run: cargo test -p aionui-session --lib spawner --locked
