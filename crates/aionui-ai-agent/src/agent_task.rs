@@ -466,6 +466,23 @@ impl AgentInstance {
         }
     }
 
+    pub fn goal_snapshot(&self) -> Option<aionui_api_types::ConversationGoalSnapshot> {
+        match self {
+            Self::Session(task) => task.goal_snapshot(),
+            _ => None,
+        }
+    }
+
+    pub async fn goal_operation(
+        &self,
+        operation: aionui_session::GoalOperation,
+    ) -> Result<aionui_api_types::ConversationGoalSnapshot, AgentError> {
+        match self {
+            Self::Session(task) => task.goal_operation(operation).await,
+            _ => Err(AgentError::bad_request("Goals are not supported by this agent")),
+        }
+    }
+
     pub async fn set_config_option(&self, option_id: &str, value: &str) -> Result<SetConfigOptionResponse, AgentError> {
         if option_id.trim().is_empty() {
             return Err(AgentError::bad_request("option_id must not be empty"));

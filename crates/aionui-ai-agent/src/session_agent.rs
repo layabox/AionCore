@@ -1102,6 +1102,28 @@ impl SessionAgentTask {
     }
 
     /// Apply a config option (mode/model/other) via dispatch.
+    pub fn goal_snapshot(&self) -> Option<aionui_api_types::ConversationGoalSnapshot> {
+        self.backend
+            .goal_snapshot()
+            .and_then(|s| serde_json::to_value(s).ok())
+            .and_then(|s| serde_json::from_value(s).ok())
+    }
+
+    pub async fn goal_operation(
+        &self,
+        operation: aionui_session::GoalOperation,
+    ) -> Result<aionui_api_types::ConversationGoalSnapshot, AgentError> {
+        let value = self
+            .backend
+            .goal_operation(operation)
+            .await
+            .map_err(|e| AgentError::bad_request(e.to_string()))?;
+        serde_json::from_value(
+            serde_json::to_value(value).map_err(|_| AgentError::bad_request("Invalid goal receipt"))?,
+        )
+        .map_err(|_| AgentError::bad_request("Invalid goal receipt"))
+    }
+
     pub async fn set_config_option(
         &self,
         option_id: &str,
@@ -1323,6 +1345,11 @@ impl IAgentTask for SessionAgentTask {
 
     fn live_background_tasks(&self) -> usize {
         self.runtime.live_background_tasks.load(Ordering::Relaxed)
+            + usize::from(self.backend.goal_snapshot().is_some_and(|snapshot| {
+                snapshot
+                    .goal
+                    .is_some_and(|goal| matches!(goal.status, aionui_session::GoalStatus::Active))
+            }))
     }
 
     fn subscribe(&self) -> broadcast::Receiver<AgentStreamEvent> {
@@ -4410,6 +4437,12 @@ fn empty_turn_tip(outcome: &aionui_session::TurnOutcome) -> Option<TipsEventData
 /// result is an absorbed teardown, not a crash). Immaterial for every other arm.
 fn translate_event(event: SessionEvent, conversation_id: &str, terminal_result_seen: bool) -> Vec<AgentStreamEvent> {
     match event {
+        SessionEvent::AdapterSpecific { tag, payload } if tag == "goal" => {
+            serde_json::from_value::<aionui_api_types::ConversationGoalSnapshot>(payload)
+                .map(|goal| vec![AgentStreamEvent::GoalChanged(goal)])
+                .unwrap_or_default()
+        }
+
         // NOTE: the Start lifecycle frame is emitted by `send_message` (before
         // dispatch), mirroring the ACP path which emits Start right before prompt().
         // The backend's own turn-start signals — claude/codex `PromptAccepted`

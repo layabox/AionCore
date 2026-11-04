@@ -24,6 +24,10 @@ pub fn conversation_ops_routes(state: ConversationRouterState) -> Router {
             put(set_config_option),
         )
         .route("/api/conversations/{id}/workspace", get(browse_workspace))
+        .route(
+            "/api/conversations/{id}/goal",
+            get(get_goal).put(set_goal).delete(clear_goal),
+        )
         .with_state(state)
 }
 
@@ -96,5 +100,39 @@ async fn browse_workspace(
             .browse_workspace(&user.id, &id, query)
             .await
             .map_err(ApiError::from)?,
+    )))
+}
+
+async fn get_goal(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<aionui_api_types::ConversationGoalSnapshot>>, ApiError> {
+    Ok(Json(ApiResponse::ok(
+        state.service.get_goal(&user.id, &id).await.map_err(ApiError::from)?,
+    )))
+}
+async fn set_goal(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    body: Result<Json<aionui_api_types::SetConversationGoalRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<aionui_api_types::ConversationGoalSnapshot>>, ApiError> {
+    let Json(req) = body.map_err(ApiError::from)?;
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .set_goal(&user.id, &id, req)
+            .await
+            .map_err(ApiError::from)?,
+    )))
+}
+async fn clear_goal(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<aionui_api_types::ConversationGoalSnapshot>>, ApiError> {
+    Ok(Json(ApiResponse::ok(
+        state.service.clear_goal(&user.id, &id).await.map_err(ApiError::from)?,
     )))
 }

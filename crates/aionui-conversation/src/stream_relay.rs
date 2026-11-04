@@ -665,6 +665,11 @@ impl StreamRelay {
                             attempt.saw_tool_or_side_effect = true;
                             self.forward_to_websocket(&event);
                         }
+                        AgentStreamEvent::GoalChanged(snapshot) => {
+                            if let Err(error) = crate::service_goal::publish_goal(&self.repo, &self.broadcaster, &self.user_id, &self.conversation_id, snapshot).await {
+                                warn!(conversation_id = %self.conversation_id, %error, "Failed to persist goal snapshot");
+                            }
+                        }
                         AgentStreamEvent::MessageLifecycle(_) => {
                             // Internal-only correlation frame (mid-turn interjection
                             // Task 3): consumed by the BackgroundStreamWatcher between
@@ -808,6 +813,7 @@ impl StreamRelay {
             AgentStreamEvent::AcpModelInfo(_) => "AcpModelInfo",
             AgentStreamEvent::AcpModeInfo(_) => "AcpModeInfo",
             AgentStreamEvent::AcpConfigOption(_) => "AcpConfigOption",
+            AgentStreamEvent::GoalChanged(_) => "GoalChanged",
             AgentStreamEvent::AcpSessionInfo(_) => "AcpSessionInfo",
             AgentStreamEvent::AcpContextUsage(_) => "AcpContextUsage",
             AgentStreamEvent::AcpTerminalOutput(_) => "AcpTerminalOutput",

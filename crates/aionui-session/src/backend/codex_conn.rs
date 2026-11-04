@@ -966,6 +966,12 @@ enum DiscoveryKind {
 /// Per-session handshake-discovered capability lists (B-CODEX-MODEL-LIST).
 #[derive(Default, Clone)]
 struct Discovered {
+    goal_pending: Arc<
+        std::sync::Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Result<super::SessionGoalSnapshot, BackendError>>>>,
+    >,
+    goal_revision: Arc<AtomicU64>,
+    goal_snapshot: Option<super::SessionGoalSnapshot>,
+    goal_active: Arc<std::sync::atomic::AtomicBool>,
     service_tier: super::codex_service_tier::State,
     models: Vec<crate::capability::ModelInfo>,
     /// For codex this holds the fixed permission-tier mode enum mapped from
@@ -976,6 +982,23 @@ struct Discovered {
 /// What `CodexSessionBackend::wake_handle` needs to re-spawn the codex app-server
 /// after an idle suspend and replay the resume handshake. `inert()` (no spawner)
 /// is used for test-built backends, which never suspend, so it is never consulted.
+fn next_goal_revision(discovered: &Arc<std::sync::Mutex<Discovered>>) -> u64 {
+    let counter = discovered
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .goal_revision
+        .clone();
+    let clock = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+        * 1000;
+    counter
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| Some(clock.max(old + 1)))
+        .unwrap_or(0);
+    counter.load(Ordering::SeqCst)
+}
+
 struct CodexWakeRecipe {
     spawner: Option<Arc<dyn Spawner>>,
     config: SessionConfig,
@@ -1300,6 +1323,7 @@ impl CodexSessionBackend {
         ));
         let idle_timer = {
             let tif = turn_in_flight.clone();
+            let goal_active = discovered.lock().unwrap_or_else(|e| e.into_inner()).goal_active.clone();
             let pending_questions = pending_tool_approvals.clone();
             // 009 R6 cleanup path 3: emit BackendSuspended on idle-reap → orchestrator
             // clears the workflow_roster (a running workflow's task_notification will
@@ -1312,7 +1336,8 @@ impl CodexSessionBackend {
                 idle_check_interval_ms(idle_ttl_ms),
                 aionui_common::now_ms,
                 move || {
-                    tif.load(std::sync::atomic::Ordering::SeqCst)
+                    goal_active.load(Ordering::SeqCst)
+                        || tif.load(std::sync::atomic::Ordering::SeqCst)
                         || pending_questions
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
@@ -1777,6 +1802,42 @@ async fn reader_task(
                                 }
                             }
                         }
+                        if matches!(m, "thread/goal/updated" | "thread/goal/cleared") {
+                            let thread = thread_binding.lock().await.clone().unwrap_or_default();
+                            if params.get("threadId").and_then(Value::as_str) != Some(thread.as_str()) {
+                                continue;
+                            }
+                            let value = if m == "thread/goal/cleared" {
+                                json!({"goal":null})
+                            } else {
+                                params.clone()
+                            };
+                            match super::codex_goal::snapshot(&value, &thread, next_goal_revision(&discovered)) {
+                                Ok(snapshot) => {
+                                    discovered.lock().unwrap_or_else(|e| e.into_inner()).goal_snapshot =
+                                        Some(snapshot.clone());
+                                    discovered.lock().unwrap_or_else(|e| e.into_inner()).goal_active.store(
+                                        snapshot.goal.as_ref().is_some_and(|goal| {
+                                            matches!(goal.status, super::codex_goal::GoalStatus::Active)
+                                        }),
+                                        Ordering::SeqCst,
+                                    );
+                                    emit(
+                                        &event_tx,
+                                        &session_id,
+                                        cur,
+                                        SessionEvent::AdapterSpecific {
+                                            tag: "goal".into(),
+                                            payload: serde_json::to_value(snapshot).unwrap_or(Value::Null),
+                                        },
+                                    );
+                                }
+                                Err(_) => {
+                                    tracing::warn!(conversation_id = %session_id, "Invalid Codex goal notification")
+                                }
+                            }
+                            continue;
+                        }
                         if m == "thread/settings/updated" {
                             let snapshot = {
                                 let mut disc = discovered.lock().unwrap_or_else(|e| e.into_inner());
@@ -1800,6 +1861,16 @@ async fn reader_task(
                             // bind threadId (backend transport key, kept private).
                             if let Some(tid) = params.get("thread").and_then(|t| t.get("id")).and_then(Value::as_str) {
                                 *thread_binding.lock().await = Some(tid.to_string());
+                                let frame = json!({"id":format!("aioncore-goal:{tid}"),"method":"thread/goal/get","params":{"threadId":tid}});
+                                if let Some(writer) = stdin.lock().await.as_mut() {
+                                    use tokio::io::AsyncWriteExt;
+                                    let mut bytes = serde_json::to_vec(&frame).unwrap_or_default();
+                                    bytes.push(b'\n');
+                                    if writer.write_all(&bytes).await.is_ok() {
+                                        let _ = writer.flush().await;
+                                    }
+                                }
+
                                 // Addendum 9: lower the binding downstream so the
                                 // conversation persists backend_session_id (the
                                 // resume/rewind anchor). This covers fresh + fork +
@@ -1815,6 +1886,7 @@ async fn reader_task(
                             }
                         }
                         if m == "turn/started" {
+                            turn_in_flight.store(true, Ordering::SeqCst);
                             terminated = false; // a new turn can terminate once (R8 reset)
                             idle_pending = false; // and a fresh turn has no deferred idle
                             system_error_pending = false; // nor a deferred systemError
@@ -2005,7 +2077,78 @@ async fn reader_task(
                                 .service_tier
                                 .observe(result);
                         }
+                        if frame
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| id.starts_with("aioncore-goal:"))
+                        {
+                            let thread = thread_binding.lock().await.clone().unwrap_or_default();
+                            if let Some(result) = frame.get("result")
+                                && let Ok(snapshot) =
+                                    super::codex_goal::snapshot(result, &thread, next_goal_revision(&discovered))
+                            {
+                                {
+                                    let mut disc = discovered.lock().unwrap_or_else(|e| e.into_inner());
+                                    disc.goal_active.store(
+                                        snapshot.goal.as_ref().is_some_and(|goal| {
+                                            matches!(goal.status, super::codex_goal::GoalStatus::Active)
+                                        }),
+                                        Ordering::SeqCst,
+                                    );
+                                    disc.goal_snapshot = Some(snapshot.clone());
+                                }
+                                emit(
+                                    &event_tx,
+                                    &session_id,
+                                    turn_gen.load(Ordering::SeqCst),
+                                    SessionEvent::AdapterSpecific {
+                                        tag: "goal".into(),
+                                        payload: serde_json::to_value(snapshot).unwrap_or(Value::Null),
+                                    },
+                                );
+                            }
+                            continue;
+                        }
                         if let Some(rid) = frame.get("id").and_then(Value::as_u64) {
+                            let goal_reply = discovered
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .goal_pending
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .remove(&rid);
+                            if let Some(reply) = goal_reply {
+                                let result = if let Some(error) = frame.get("error") {
+                                    Err(BackendError::SetupRejected(
+                                        error
+                                            .get("message")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or("Codex rejected the goal request")
+                                            .to_owned(),
+                                    ))
+                                } else {
+                                    let thread = thread_binding.lock().await.clone().unwrap_or_default();
+                                    let revision = next_goal_revision(&discovered);
+                                    super::codex_goal::snapshot(
+                                        frame.get("result").unwrap_or(&Value::Null),
+                                        &thread,
+                                        revision,
+                                    )
+                                };
+                                if let Ok(snapshot) = &result {
+                                    discovered.lock().unwrap_or_else(|e| e.into_inner()).goal_snapshot =
+                                        Some(snapshot.clone());
+                                    discovered.lock().unwrap_or_else(|e| e.into_inner()).goal_active.store(
+                                        snapshot.goal.as_ref().is_some_and(|goal| {
+                                            matches!(goal.status, super::codex_goal::GoalStatus::Active)
+                                        }),
+                                        Ordering::SeqCst,
+                                    );
+                                }
+                                let _ = reply.send(result);
+                                continue;
+                            }
+
                             let error_message = frame.get("error").map(|e| {
                                 e.get("message")
                                     .and_then(Value::as_str)
@@ -4129,6 +4272,66 @@ fn extract_http_status_from_message(message: &str) -> Option<u64> {
 
 #[async_trait::async_trait]
 impl SessionBackend for CodexSessionBackend {
+    fn goal_snapshot(&self) -> Option<super::SessionGoalSnapshot> {
+        self.discovered
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .goal_snapshot
+            .clone()
+    }
+
+    async fn goal_operation(
+        &self,
+        operation: super::GoalOperation,
+    ) -> Result<super::SessionGoalSnapshot, BackendError> {
+        // Mutations may wake; reading history must never wake the native thread.
+        if !matches!(operation, super::GoalOperation::Read) {
+            self.suspend.ensure_awake(aionui_common::now_ms(), || self.wake_handle()).await?;
+        }
+        let thread = self.bound_thread().await?;
+        let (method, mut params) = match operation {
+            super::GoalOperation::Read => ("thread/goal/get", json!({})),
+            super::GoalOperation::Clear => ("thread/goal/clear", json!({"origin":"user"})),
+            super::GoalOperation::Set {
+                objective,
+                status,
+                token_budget,
+            } => {
+                let mut params = json!({"origin":"user"});
+                if let Some(objective) = objective {
+                    params["objective"] = json!(objective);
+                }
+                if let Some(status) = status {
+                    params["status"] = json!(status);
+                }
+                if let Some(budget) = token_budget {
+                    params["tokenBudget"] = json!(budget);
+                }
+                ("thread/goal/set", params)
+            }
+        };
+        params["threadId"] = json!(thread);
+        let id = self.next_rpc_id();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let pending = self
+            .discovered
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .goal_pending
+            .clone();
+        pending.lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
+        if let Err(error) = self.write_frame(json!({"id":id,"method":method,"params":params})).await {
+            pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+            return Err(error);
+        }
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx).await;
+        pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        match result {
+            Ok(Ok(result)) => result,
+            _ => Err(BackendError::Transport("Codex goal request did not complete".into())),
+        }
+    }
+
     /// Force-kill path (`UserCancelTimeout`): delegate to the suspend
     /// controller's unconditional teardown (abort reader → group-kill the codex
     /// CLI process tree), so the process dies even while an orchestrator still
@@ -10806,5 +11009,86 @@ mod tests {
             "a late subscriber's first event is the replayed binding, got {:?}",
             first.event
         );
+    }
+}
+
+#[cfg(test)]
+mod goal_tests {
+    use super::*;
+    use crate::testing::FakeAgentIo;
+
+    #[tokio::test]
+    async fn native_goal_rpc_receipt_and_rejection_are_correlated() {
+        let lines: Vec<Value> = include_str!("codex_goal.capture.ndjson")
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let recorded = lines
+            .iter()
+            .find(|line| line["direction"] == "out" && line["frame"]["id"] == 3)
+            .unwrap()["frame"]["result"]
+            .clone();
+        let thread = recorded["goal"]["threadId"].as_str().unwrap();
+        for reject in [false, true] {
+            let prefix = format!(
+                "{}\n",
+                json!({"method":"thread/started","params":{"thread":{"id":thread}}})
+            );
+            let reply = if reject {
+                json!({"id":1,"error":{"code":-32601,"message":"Goal API unavailable"}})
+            } else {
+                json!({"id":1,"result":recorded})
+            };
+            let io = FakeAgentIo::never_exits(prefix.into_bytes()).with_gated_tail(format!("{reply}\n").into_bytes());
+            let written = io.captured_stdin();
+            let release = io.stdout_releaser();
+            let backend = Arc::new(CodexSessionBackend::build_with_io("goal-test", Box::new(io)).await);
+            let call = {
+                let backend = backend.clone();
+                tokio::spawn(async move {
+                    backend
+                        .goal_operation(super::super::GoalOperation::Set {
+                            objective: Some("Native goal test".into()),
+                            status: Some("paused".into()),
+                            token_budget: Some(1000),
+                        })
+                        .await
+                })
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if String::from_utf8_lossy(&written.lock().await).contains("thread/goal/set") {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            release();
+            let result = call.await.unwrap();
+            if reject {
+                assert!(result.unwrap_err().to_string().contains("Goal API unavailable"));
+            } else {
+                assert!(matches!(
+                    result.unwrap().goal.unwrap().status,
+                    super::super::GoalStatus::Paused
+                ));
+            }
+            let bytes = written.lock().await.clone();
+            let frames: Vec<Value> = String::from_utf8(bytes)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let sent = frames
+                .iter()
+                .find(|frame| frame["method"] == "thread/goal/set")
+                .unwrap();
+            assert_eq!(sent["params"]["threadId"], thread);
+            assert_eq!(sent["params"]["origin"], "user");
+            assert_eq!(sent["params"]["status"], "paused");
+            assert!(!frames.iter().any(|frame| frame["method"] == "turn/start"));
+        }
     }
 }

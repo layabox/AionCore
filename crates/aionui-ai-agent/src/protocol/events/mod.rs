@@ -54,6 +54,7 @@ pub enum AgentStreamEvent {
     AcpModelInfo(serde_json::Value),
     AcpModeInfo(serde_json::Value),
     AcpConfigOption(serde_json::Value),
+    GoalChanged(aionui_api_types::ConversationGoalSnapshot),
     AcpSessionInfo(serde_json::Value),
     AcpContextUsage(serde_json::Value),
     /// Live snapshot of a client-hosted terminal (ACP `terminal/*`):

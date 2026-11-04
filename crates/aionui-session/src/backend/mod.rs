@@ -13,6 +13,8 @@ mod antigravity;
 mod claude_conn;
 mod cli_version;
 mod codex_conn;
+mod codex_goal;
+pub use codex_goal::{GoalOperation, GoalStatus, SessionGoalSnapshot};
 mod codex_questions;
 mod codex_service_tier;
 mod codex_title;
@@ -81,6 +83,15 @@ pub(crate) fn handshake_budget() -> std::time::Duration {
 /// frame writer (a microsecond byte-frame lock, not a per-turn lock).
 #[async_trait::async_trait]
 pub trait SessionBackend: Send + Sync {
+    fn goal_snapshot(&self) -> Option<SessionGoalSnapshot> {
+        None
+    }
+
+    /// A user-controlled persistent objective. Reads must not wake a suspended process.
+    async fn goal_operation(&self, _operation: GoalOperation) -> Result<SessionGoalSnapshot, BackendError> {
+        Err(BackendError::CommandNotSupported { command: "goal" })
+    }
+
     /// Dispatch a command. FAST: returns a receipt the instant the adapter has
     /// accepted+queued it on the wire — does NOT block on turn completion (the
     /// turn flows up `events()`). Capability-gated: an unsupported command

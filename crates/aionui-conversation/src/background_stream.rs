@@ -237,6 +237,19 @@ impl BackgroundStreamWatcher {
                 continue;
             }
             match &ev {
+                AgentStreamEvent::GoalChanged(snapshot) => {
+                    if let Err(error) = crate::service_goal::publish_goal(
+                        &self.repo,
+                        &self.broadcaster,
+                        &self.user_id,
+                        &self.conversation_id,
+                        snapshot,
+                    )
+                    .await
+                    {
+                        warn!(conversation_id = %self.conversation_id, %error, "Failed to persist goal snapshot");
+                    }
+                }
                 AgentStreamEvent::WorkflowProgress(data) => self.handle_card_refresh(data).await,
                 // Config snapshots / mode confirmations arriving BETWEEN turns. These are
                 // exactly the frames that carry "the switch actually took effect" for the

@@ -15,6 +15,10 @@ mod chat_file;
 mod confirmation;
 mod connection_test;
 mod conversation;
+mod goal;
+pub use goal::{
+    ConversationGoal, ConversationGoalSnapshot, ConversationGoalStatus, GoalUserStatus, SetConversationGoalRequest,
+};
 mod conversation_tools;
 mod cron;
 mod custom_agent;

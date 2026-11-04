@@ -232,6 +232,7 @@ impl ChannelMessageService {
             | AgentStreamEvent::CronTrigger(_)
             | AgentStreamEvent::AcpModelInfo(_)
             | AgentStreamEvent::AcpModeInfo(_)
+            | AgentStreamEvent::GoalChanged(_)
             | AgentStreamEvent::AcpConfigOption(_)
             | AgentStreamEvent::AcpSessionInfo(_)
             | AgentStreamEvent::AcpContextUsage(_)

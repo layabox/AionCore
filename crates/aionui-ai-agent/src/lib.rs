@@ -76,3 +76,5 @@ pub use session_context::{
     WorkspaceContext,
 };
 pub use task_manager::{IWorkerTaskManager, WorkerTaskManagerImpl};
+
+pub use aionui_session::GoalOperation;

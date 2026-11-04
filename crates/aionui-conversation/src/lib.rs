@@ -17,6 +17,7 @@ mod runtime_persistence;
 pub mod runtime_routes;
 pub mod runtime_state;
 pub mod service;
+mod service_goal;
 mod service_ops;
 pub(crate) mod session_context;
 pub mod session_mentions;
