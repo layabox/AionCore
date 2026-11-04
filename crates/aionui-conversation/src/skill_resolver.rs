@@ -325,8 +325,16 @@ mod tests {
             assistant_rules_dir: tmp.path().join("assistant-rules"),
             assistant_skills_dir: tmp.path().join("assistant-skills"),
         });
-        let user_a_skill = tmp.path().join("user-a-skill");
-        let user_b_skill = tmp.path().join("user-b-skill");
+        // The runtime's pinned containment policy only resolves current skill storage.
+        // Keep both owners' same-name fixtures inside their real per-user roots.
+        let user_a_skill = paths
+            .user_skills_dir
+            .join("users")
+            .join(aionui_common::user_dir_name("system_default_user").unwrap_or_else(|_| "system_default_user".into()));
+        let user_b_skill = paths
+            .user_skills_dir
+            .join("users")
+            .join(aionui_common::user_dir_name("user_b").unwrap_or_else(|_| "user_b".into()));
         write_skill(&user_a_skill, "shared", "User A skill");
         write_skill(&user_b_skill, "shared", "User B skill");
 

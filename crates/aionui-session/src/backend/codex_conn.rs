@@ -964,13 +964,15 @@ enum DiscoveryKind {
 }
 
 /// Per-session handshake-discovered capability lists (B-CODEX-MODEL-LIST).
+type PendingGoalRequests =
+    Arc<std::sync::Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Result<super::SessionGoalSnapshot, BackendError>>>>>;
+
 #[derive(Default, Clone)]
 struct Discovered {
-    goal_pending: Arc<
-        std::sync::Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Result<super::SessionGoalSnapshot, BackendError>>>>,
-    >,
+    goal_pending: PendingGoalRequests,
     goal_revision: Arc<AtomicU64>,
     goal_snapshot: Option<super::SessionGoalSnapshot>,
+    goal_discovery_requested: bool,
     goal_active: Arc<std::sync::atomic::AtomicBool>,
     service_tier: super::codex_service_tier::State,
     models: Vec<crate::capability::ModelInfo>,
@@ -1459,11 +1461,12 @@ impl CodexSessionBackend {
         // A handshake is a fresh chance: any prior resume rejection belonged to
         // the previous process/attempt.
         *self.resume_poison.lock().await = None;
-        self.discovered
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .service_tier
-            .begin_handshake();
+        {
+            let mut discovered = self.discovered.lock().unwrap_or_else(|error| error.into_inner());
+            discovered.service_tier.begin_handshake();
+            discovered.goal_snapshot = None;
+            discovered.goal_discovery_requested = true;
+        }
         self.write_frame(initialize_params().into_frame(self.next_rpc_id(), "initialize"))
             .await?;
 
@@ -1861,13 +1864,19 @@ async fn reader_task(
                             // bind threadId (backend transport key, kept private).
                             if let Some(tid) = params.get("thread").and_then(|t| t.get("id")).and_then(Value::as_str) {
                                 *thread_binding.lock().await = Some(tid.to_string());
-                                let frame = json!({"id":format!("aioncore-goal:{tid}"),"method":"thread/goal/get","params":{"threadId":tid}});
-                                if let Some(writer) = stdin.lock().await.as_mut() {
-                                    use tokio::io::AsyncWriteExt;
-                                    let mut bytes = serde_json::to_vec(&frame).unwrap_or_default();
-                                    bytes.push(b'\n');
-                                    if writer.write_all(&bytes).await.is_ok() {
-                                        let _ = writer.flush().await;
+                                let discover_goal = {
+                                    let mut disc = discovered.lock().unwrap_or_else(|e| e.into_inner());
+                                    std::mem::take(&mut disc.goal_discovery_requested)
+                                };
+                                if discover_goal {
+                                    let frame = json!({"id":format!("aioncore-goal:{tid}"),"method":"thread/goal/get","params":{"threadId":tid}});
+                                    if let Some(writer) = stdin.lock().await.as_mut() {
+                                        use tokio::io::AsyncWriteExt;
+                                        let mut bytes = serde_json::to_vec(&frame).unwrap_or_default();
+                                        bytes.push(b'\n');
+                                        if writer.write_all(&bytes).await.is_ok() {
+                                            let _ = writer.flush().await;
+                                        }
                                     }
                                 }
 
@@ -2082,6 +2091,14 @@ async fn reader_task(
                             .and_then(Value::as_str)
                             .is_some_and(|id| id.starts_with("aioncore-goal:"))
                         {
+                            if discovered
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .goal_snapshot
+                                .is_some()
+                            {
+                                continue;
+                            }
                             let thread = thread_binding.lock().await.clone().unwrap_or_default();
                             if let Some(result) = frame.get("result")
                                 && let Ok(snapshot) =
@@ -4286,7 +4303,9 @@ impl SessionBackend for CodexSessionBackend {
     ) -> Result<super::SessionGoalSnapshot, BackendError> {
         // Mutations may wake; reading history must never wake the native thread.
         if !matches!(operation, super::GoalOperation::Read) {
-            self.suspend.ensure_awake(aionui_common::now_ms(), || self.wake_handle()).await?;
+            self.suspend
+                .ensure_awake(aionui_common::now_ms(), || self.wake_handle())
+                .await?;
         }
         let thread = self.bound_thread().await?;
         let (method, mut params) = match operation {
@@ -11016,6 +11035,56 @@ mod tests {
 mod goal_tests {
     use super::*;
     use crate::testing::FakeAgentIo;
+
+    #[tokio::test]
+    async fn native_goal_discovery_is_a_handshake_query_and_recovers_without_subscribers() {
+        let lines: Vec<Value> = include_str!("codex_goal.capture.ndjson")
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let recorded = lines
+            .iter()
+            .find(|line| line["direction"] == "out" && line["frame"]["id"] == 3)
+            .unwrap()["frame"]["result"]
+            .clone();
+        let thread = recorded["goal"]["threadId"].as_str().unwrap();
+        let tail = format!(
+            "{}\n{}\n",
+            json!({"method":"thread/started","params":{"thread":{"id":thread}}}),
+            json!({"id":format!("aioncore-goal:{thread}"),"result":recorded})
+        );
+        let io = FakeAgentIo::never_exits(Vec::new()).with_gated_tail(tail.into_bytes());
+        let captured = io.captured_stdin();
+        let release = io.stdout_releaser();
+        let backend = CodexSessionBackend::build_with_io("goal-discovery", Box::new(io)).await;
+        backend.run_handshake(HandshakeMode::Fresh).await.unwrap();
+        release();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while backend.goal_snapshot().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            backend.goal_snapshot().unwrap().goal.unwrap().status,
+            super::super::GoalStatus::Paused
+        ));
+        let bytes = captured.lock().await.clone();
+        let frames: Vec<Value> = String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame["method"] == "thread/goal/get")
+                .count(),
+            1
+        );
+        assert!(!frames.iter().any(|frame| frame["method"] == "turn/start"));
+    }
 
     #[tokio::test]
     async fn native_goal_rpc_receipt_and_rejection_are_correlated() {

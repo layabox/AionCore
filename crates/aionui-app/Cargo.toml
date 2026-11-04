@@ -1,6 +1,6 @@
 [package]
 name = "aionui-app"
-version = "0.2.2+layabox.1"
+version = "0.2.2+layabox.2"
 edition.workspace = true
 exclude = ["data/**"]
 

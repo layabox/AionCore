@@ -189,6 +189,7 @@ fn event_type_name(event: &AgentStreamEvent) -> &'static str {
         AgentStreamEvent::AcpModelInfo(_) => "AcpModelInfo",
         AgentStreamEvent::AcpModeInfo(_) => "AcpModeInfo",
         AgentStreamEvent::AcpConfigOption(_) => "AcpConfigOption",
+        AgentStreamEvent::GoalChanged(_) => "GoalChanged",
         AgentStreamEvent::AcpSessionInfo(_) => "AcpSessionInfo",
         AgentStreamEvent::AcpContextUsage(_) => "AcpContextUsage",
         AgentStreamEvent::AcpTerminalOutput(_) => "AcpTerminalOutput",

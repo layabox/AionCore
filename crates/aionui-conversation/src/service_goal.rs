@@ -116,3 +116,91 @@ impl ConversationService {
         Ok(snapshot)
     }
 }
+
+#[cfg(test)]
+mod goal_tests {
+    use super::*;
+    use aionui_db::{SqliteConversationRepository, init_database_memory, models::ConversationRow};
+    use aionui_realtime::{BroadcastEventBus, EventBroadcaster};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn goal_snapshot_persists_tombstone_and_owner_event_without_regression() {
+        let db = init_database_memory().await.unwrap();
+        let repo: Arc<dyn IConversationRepository> = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
+        let user = "system_default_user";
+        let row = ConversationRow {
+            id: "goal-test".into(),
+            user_id: user.into(),
+            name: "Goal test".into(),
+            r#type: "acp".into(),
+            extra: "{}".into(),
+            model: None,
+            status: Some("pending".into()),
+            source: Some("aionui".into()),
+            channel_chat_id: None,
+            pinned: false,
+            pinned_at: None,
+            created_at: 1,
+            updated_at: 1,
+            project_id: None,
+            folder_id: None,
+            name_source: None,
+        };
+        repo.create(&row).await.unwrap();
+        let event_bus = Arc::new(BroadcastEventBus::new(8));
+        let mut rx = event_bus.subscribe();
+        let bus: Arc<dyn EventBroadcaster> = event_bus;
+        let snapshot: ConversationGoalSnapshot = serde_json::from_value(json!({"revision":100,"goal":{
+            "objective":"Goal persistence test","status":"paused","tokenBudget":1000,"tokensUsed":250,
+            "timeUsedSeconds":10,"createdAt":1793790978,"updatedAt":1793790978
+        }}))
+        .unwrap();
+        publish_goal(&repo, &bus, user, &row.id, &snapshot).await.unwrap();
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.name, "conversation.goalChanged");
+        assert_eq!(event.data["user_id"], user);
+        assert_eq!(event.data["conversation_id"], row.id);
+        assert!(event.data["goal"].get("threadId").is_none());
+        let cleared = ConversationGoalSnapshot {
+            goal: None,
+            revision: 101,
+        };
+        publish_goal(&repo, &bus, user, &row.id, &cleared).await.unwrap();
+        assert!(rx.recv().await.unwrap().data["goal"].is_null());
+        publish_goal(&repo, &bus, user, &row.id, &snapshot).await.unwrap();
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        let saved = repo
+            .get_message_by_msg_id(user, &row.id, "goal-test:goal", "acp_goal")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(saved.hidden);
+        let restored: ConversationGoalSnapshot = serde_json::from_str(&saved.content).unwrap();
+        assert!(restored.goal.is_none());
+        assert_eq!(restored.revision, 101);
+        assert!(
+            repo.get_message_by_msg_id("different-user", &row.id, "goal-test:goal", "acp_goal")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            publish_goal(
+                &repo,
+                &bus,
+                "different-user",
+                &row.id,
+                &ConversationGoalSnapshot {
+                    goal: None,
+                    revision: 102
+                }
+            )
+            .await
+            .is_err()
+        );
+    }
+}

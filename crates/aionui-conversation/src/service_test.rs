@@ -9980,3 +9980,26 @@ mod session_mentions_integration {
         }
     }
 }
+
+#[tokio::test]
+async fn goal_history_read_and_invalid_mutations_do_not_create_tasks() {
+    let (svc, _bus, _repo, task_manager) = make_service();
+    let conversation = svc.create("user_1", make_create_req()).await.unwrap();
+    assert!(task_manager.get_task(&conversation.id).is_none());
+    assert!(svc.get_goal("user_1", &conversation.id).await.unwrap().goal.is_none());
+    assert!(task_manager.get_task(&conversation.id).is_none());
+    assert!(matches!(
+        svc.get_goal("foreign-user", &conversation.id).await.unwrap_err(),
+        ConversationError::NotFound { .. }
+    ));
+    let request = aionui_api_types::SetConversationGoalRequest {
+        objective: Some(" ".into()),
+        status: None,
+        token_budget: None,
+    };
+    assert!(matches!(
+        svc.set_goal("user_1", &conversation.id, request).await.unwrap_err(),
+        ConversationError::BadRequest { .. }
+    ));
+    assert!(task_manager.get_task(&conversation.id).is_none());
+}
