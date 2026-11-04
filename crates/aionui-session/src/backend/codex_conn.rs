@@ -1768,6 +1768,13 @@ async fn reader_task(
                         .await;
                     }
                     (Some(m), false) => {
+                        // Native Goal turns have no local Send receipt to advance the
+                        // generation. Bind them before emitting BackendTurnBound so
+                        // the pump re-arms Running and terminal dedup for every turn.
+                        // Verified: codex_goal.active.capture.ndjson (CLI 0.161.0).
+                        if m == "turn/started" && !turn_in_flight.swap(true, Ordering::SeqCst) {
+                            turn_gen.fetch_add(1, Ordering::SeqCst);
+                        }
                         // server notification → SessionEvent(s)
                         let cur = turn_gen.load(Ordering::SeqCst);
                         let params = frame.get("params").unwrap_or(&Value::Null);
@@ -11035,6 +11042,66 @@ mod tests {
 mod goal_tests {
     use super::*;
     use crate::testing::FakeAgentIo;
+
+    #[tokio::test]
+    async fn native_goal_turns_advance_generation_without_double_counting_local_send() {
+        let captured: Vec<Value> = include_str!("codex_goal.active.capture.ndjson")
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let started = captured.iter().find(|frame| frame["method"] == "turn/started").unwrap();
+        for local_send in [false, true] {
+            let mut tail = String::new();
+            for id in ["native-1", "native-2"] {
+                let mut frame = started.clone();
+                frame["params"]["turn"]["id"] = json!(id);
+                tail.push_str(&format!("{frame}\n"));
+                // Terminal shape also covered by r8_two_turns_each_terminate_once.
+                tail.push_str(&format!(
+                    "{}\n",
+                    json!({"method":"turn/completed",
+                    "params":{"turn":{"id":id,"status":"completed"}}})
+                ));
+            }
+            let io = FakeAgentIo::never_exits(Vec::new()).with_gated_tail(tail.into_bytes());
+            let release = io.stdout_releaser();
+            let backend = CodexSessionBackend::build_with_io("goal-generation", Box::new(io)).await;
+            if local_send {
+                backend.turn_gen.store(7, Ordering::SeqCst);
+                backend.mark_turn_in_flight_for_test();
+            }
+            let mut events = backend.events();
+            release();
+            let observed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                let mut observed = Vec::new();
+                while let Some(env) = events.next().await {
+                    match env.event {
+                        SessionEvent::BackendTurnBound { .. } => observed.push(("start", env.turn_gen)),
+                        SessionEvent::TurnResult { .. } => {
+                            observed.push(("end", env.turn_gen));
+                            if observed.len() == 4 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                observed
+            })
+            .await
+            .unwrap();
+            let first = if local_send { 7 } else { 1 };
+            assert_eq!(
+                observed,
+                vec![
+                    ("start", first),
+                    ("end", first),
+                    ("start", first + 1),
+                    ("end", first + 1)
+                ]
+            );
+        }
+    }
 
     #[tokio::test]
     async fn native_goal_discovery_is_a_handshake_query_and_recovers_without_subscribers() {
