@@ -4917,9 +4917,8 @@ impl ConversationService {
             .skill_resolver
             .resolve_skills_for_user(&context.conversation.user_id, &skill_names)
             .await;
-        if resolved.is_empty() {
-            return;
-        }
+        // A previously materialized view may still link to the former project.
+        // Rebuild even when all of the persisted names are now unavailable.
         self.skill_resolver
             .sync_skill_view(&context.conversation.user_id, context.conversation_id(), &resolved)
             .await;

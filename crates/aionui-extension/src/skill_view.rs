@@ -175,7 +175,7 @@ pub async fn rebuild_view(
     // one just linked -- and skipping them is not merely an optimization: a wipe
     // and relink would briefly empty a directory a CLI may be reading, and would
     // re-derive an "added" count against a snapshot of our own making.
-    if previously_linked == desired {
+    if previously_linked == desired && links_match_sources(&skills_dir, &linkable).await {
         debug!(
             user_id = %user_id,
             conversation_id = %conversation_id,
@@ -235,6 +235,21 @@ pub async fn rebuild_view(
         "skill_view: rebuilt session skill view"
     );
     Ok(created)
+}
+
+async fn links_match_sources(skills_dir: &Path, skills: &[&ResolvedAgentSkill]) -> bool {
+    for skill in skills {
+        let Ok(target) = tokio::fs::canonicalize(skills_dir.join(&skill.name)).await else {
+            return false;
+        };
+        let Ok(source) = tokio::fs::canonicalize(&skill.source_path).await else {
+            return false;
+        };
+        if target != source {
+            return false;
+        }
+    }
+    true
 }
 
 /// Skill names currently linked in the view. Empty when the view does not exist
@@ -411,6 +426,32 @@ mod tests {
             skills_dir.join("pdf").symlink_metadata().is_err(),
             "a removed skill must not linger"
         );
+    }
+
+    #[tokio::test]
+    async fn rebuild_replaces_old_project_links_for_the_same_skill_name() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let data_dir = tmp.path().join("data");
+        let old = write_source_skill(&tmp.path().join("old"), "review");
+        let current = write_source_skill(&tmp.path().join("current"), "review");
+        for conversation in ["lark_history", "weixin_history"] {
+            let link = view_skills_dir(&data_dir, "user_a", conversation)
+                .unwrap()
+                .join("review");
+            rebuild_view(&data_dir, "user_a", conversation, std::slice::from_ref(&old))
+                .await
+                .unwrap();
+            rebuild_view(&data_dir, "user_a", conversation, std::slice::from_ref(&current))
+                .await
+                .unwrap();
+            assert_eq!(
+                std::fs::canonicalize(&link).unwrap(),
+                std::fs::canonicalize(&current.source_path).unwrap()
+            );
+            rebuild_view(&data_dir, "user_a", conversation, &[]).await.unwrap();
+            assert!(link.symlink_metadata().is_err());
+            assert!(old.source_path.join("SKILL.md").is_file());
+        }
     }
 
     /// Rebuilding with an unchanged snapshot must be a no-op from the caller's

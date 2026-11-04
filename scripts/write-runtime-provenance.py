@@ -38,6 +38,7 @@ provenance = {
     "platform": args.platform,
     "target": args.target,
     "compiler": subprocess.check_output(["rustc", "--version"], text=True).strip(),
+    "runtimeVersion": subprocess.check_output([str(args.binary.resolve()), "--version"], text=True).strip().split()[-1],
     "binarySha256": hashlib.file_digest(args.binary.open("rb"), "sha256").hexdigest(),
 }
 args.output.mkdir(parents=True, exist_ok=True)

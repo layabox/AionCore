@@ -16,7 +16,7 @@ use aionui_ai_agent::runtime_token::{RuntimeTokenScope, RuntimeTokenService};
 use aionui_api_types::SKILL_RUNTIME_SCHEMA_VERSION;
 use aionui_db::models::ConversationRow;
 use aionui_db::{
-    IConversationRepository, ISkillRepository, SqliteConversationRepository, SqliteSkillRepository,
+    IConversationRepository, ISkillRepository, SqliteConversationRepository, SqliteSkillRepository, UpsertSkillParams,
     init_database_memory,
 };
 use aionui_extension::SkillPaths;
@@ -127,6 +127,15 @@ impl TestHarness {
 
     /// Insert a conversation whose `extra.skills` snapshot is `skills`.
     pub async fn create_conversation(&self, user_id: &str, skills: &[&str]) -> String {
+        self.create_conversation_with_source(user_id, skills, None).await
+    }
+
+    pub async fn create_conversation_with_source(
+        &self,
+        user_id: &str,
+        skills: &[&str],
+        source: Option<&str>,
+    ) -> String {
         self.ensure_user(user_id).await;
         let n = self.next_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let id = format!("conv_{user_id}_{n}");
@@ -140,7 +149,7 @@ impl TestHarness {
             model: None,
             // NOT NULL in the schema despite the Option in the row model.
             status: Some("finished".to_owned()),
-            source: None,
+            source: source.map(str::to_owned),
             channel_chat_id: None,
             pinned: false,
             pinned_at: None,
@@ -152,6 +161,22 @@ impl TestHarness {
         };
         self.conversation_repo.create(&row).await.unwrap();
         id
+    }
+
+    pub async fn record_custom_skill(&self, user_id: &str, name: &str, directory: &std::path::Path) {
+        SqliteSkillRepository::new(self.pool.clone())
+            .upsert_for_user(
+                user_id,
+                UpsertSkillParams {
+                    name,
+                    description: None,
+                    path: &directory.to_string_lossy(),
+                    source: "user",
+                    enabled: true,
+                },
+            )
+            .await
+            .unwrap();
     }
 
     fn token(&self, user_id: &str, conversation_id: &str) -> String {

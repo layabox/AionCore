@@ -111,13 +111,31 @@ pub(crate) async fn resolve_skill_delivery(
 ) -> ResolvedSkillDelivery {
     let skill_dirs = deps.skill_manager.resolve_skill_dirs_for_user(user_id, skills).await;
 
-    // A rejected id yields no view path. `plan_skill_delivery` then contributes
-    // no plugin flag rather than a half-substituted one.
-    let view_dir = aionui_extension::skill_view::view_dir(&deps.data_dir, user_id, conversation_id)
-        .ok()
+    // Never attach a stale view if replacing its links failed.
+    let view_sources: Vec<_> = skill_dirs
+        .iter()
+        .map(|skill| aionui_extension::skill_service::ResolvedAgentSkill {
+            name: skill.name.clone(),
+            source_path: std::path::PathBuf::from(&skill.path),
+        })
+        .collect();
+    let view_ready = !view_sources.is_empty()
+        && match aionui_extension::skill_view::rebuild_view(&deps.data_dir, user_id, conversation_id, &view_sources)
+            .await
+        {
+            Ok(count) => count == view_sources.len(),
+            Err(error) => {
+                tracing::warn!(conversation_id, %error, "not attaching an unsafe session skill view");
+                false
+            }
+        };
+    let view_dir = view_ready
+        .then(|| aionui_extension::skill_view::view_dir(&deps.data_dir, user_id, conversation_id).ok())
+        .flatten()
         .map(|path| path.to_string_lossy().into_owned());
-    let view_skills_dir = aionui_extension::skill_view::view_skills_dir(&deps.data_dir, user_id, conversation_id)
-        .ok()
+    let view_skills_dir = view_ready
+        .then(|| aionui_extension::skill_view::view_skills_dir(&deps.data_dir, user_id, conversation_id).ok())
+        .flatten()
         .map(|path| path.to_string_lossy().into_owned());
 
     let plan = crate::skill_delivery_plan::plan_skill_delivery(crate::skill_delivery_plan::SkillDeliveryPlanInput {

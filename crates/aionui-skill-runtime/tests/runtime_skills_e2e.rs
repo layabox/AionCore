@@ -9,6 +9,38 @@ mod common;
 use axum::http::StatusCode;
 use common::TestHarness;
 
+#[tokio::test]
+async fn existing_channel_conversations_only_read_custom_skills_in_the_current_project() {
+    let h = TestHarness::new().await;
+    let old = tempfile::TempDir::new().unwrap();
+    let old_skill = old.path().join("skills").join("review");
+    let local_skill = h.data_dir().join("skills").join("review");
+    for (directory, body) in [(&old_skill, "old project body"), (&local_skill, "current project body")] {
+        std::fs::create_dir_all(directory).unwrap();
+        std::fs::write(directory.join("SKILL.md"), body).unwrap();
+    }
+
+    let user = "channel-user";
+    let lark = h.create_conversation_with_source(user, &["review"], Some("lark")).await;
+    let weixin = h
+        .create_conversation_with_source(user, &["review"], Some("weixin"))
+        .await;
+    h.record_custom_skill(user, "review", &old_skill).await;
+    for conversation in [&lark, &weixin] {
+        let (status, body) = h.get_raw(user, conversation, "/api/runtime/skills/review").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        let catalog = h.get_json(user, conversation, "/api/runtime/skills").await;
+        assert_eq!(catalog["data"]["skills"], serde_json::json!([]));
+    }
+
+    h.record_custom_skill(user, "review", &local_skill).await;
+    for conversation in [&lark, &weixin] {
+        let body = h.get_json(user, conversation, "/api/runtime/skills/review").await;
+        assert_eq!(body["data"]["body"], "current project body");
+        assert_eq!(body["data"]["path"], local_skill.to_string_lossy().as_ref());
+    }
+}
+
 // ── Security ────────────────────────────────────────────────────────
 
 #[tokio::test]

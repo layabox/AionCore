@@ -1421,6 +1421,13 @@ async fn resolve_skill_source_path_with_repo_for_user(
 ) -> Result<Option<PathBuf>, ExtensionError> {
     if let Some(row) = repo.find_by_name_any_for_user(user_id, name).await? {
         let path = PathBuf::from(&row.path);
+        if matches!(skill_source_from_row(&row.source), SkillSource::Custom)
+            && !is_current_user_skill_directory(paths, &path).await
+        {
+            // Keep the catalog entry available for migration, but never serve its old path.
+            warn!(skill = %name, "skipping custom skill outside the current skill storage");
+            return Ok(None);
+        }
         if path.is_dir() {
             return Ok(Some(path));
         }
@@ -1446,6 +1453,22 @@ async fn resolve_skill_source_path_with_repo_for_user(
     // they hold user content (job prompts) and must resolve only through
     // a repo row owned by the requesting user.
     Ok(None)
+}
+
+async fn is_current_user_skill_directory(paths: &SkillPaths, directory: &Path) -> bool {
+    let Ok(relative_root) = paths.user_skills_dir.strip_prefix(&paths.data_dir) else {
+        return false;
+    };
+    let Ok(current_data_dir) = tokio::fs::canonicalize(&paths.data_dir).await else {
+        return false;
+    };
+    let current_root = current_data_dir.join(relative_root);
+    if !directory.starts_with(&paths.user_skills_dir) && !directory.starts_with(&current_root) {
+        return false;
+    }
+    tokio::fs::canonicalize(directory)
+        .await
+        .is_ok_and(|resolved| resolved != current_root && resolved.starts_with(&current_root))
 }
 
 // ---------------------------------------------------------------------------
