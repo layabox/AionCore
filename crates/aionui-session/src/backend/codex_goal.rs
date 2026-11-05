@@ -22,8 +22,10 @@ pub struct SessionGoal {
     pub objective: String,
     pub status: GoalStatus,
     pub token_budget: Option<u64>,
-    pub tokens_used: u64,
-    pub time_used_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_used: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_used_seconds: Option<u64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -37,10 +39,13 @@ pub enum GoalStatus {
     UsageLimited,
     BudgetLimited,
     Complete,
+    Limited,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionGoalSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<Vec<String>>,
     pub revision: u64,
     pub goal: Option<SessionGoal>,
 }
@@ -60,7 +65,11 @@ pub(super) fn snapshot(value: &Value, thread_id: &str, revision: u64) -> Result<
             "Codex goal belongs to a different thread".into(),
         ));
     }
-    Ok(SessionGoalSnapshot { goal, revision })
+    Ok(SessionGoalSnapshot {
+        goal,
+        revision,
+        actions: Some(["set", "pause", "resume", "clear"].map(str::to_owned).to_vec()),
+    })
 }
 
 #[cfg(test)]
@@ -80,7 +89,7 @@ mod tests {
         let set = replies.iter().find(|line| line["id"] == 3).unwrap();
         let thread = set["result"]["goal"]["threadId"].as_str().unwrap();
         let parsed = snapshot(&set["result"], thread, 1).unwrap();
-        assert_eq!(parsed.goal.as_ref().unwrap().tokens_used, 0);
+        assert_eq!(parsed.goal.as_ref().unwrap().tokens_used, Some(0));
         assert_eq!(parsed.goal.as_ref().unwrap().token_budget, Some(1000));
         assert!(matches!(parsed.goal.unwrap().status, GoalStatus::Paused));
         assert!(snapshot(&set["result"], "wrong-thread", 1).is_err());

@@ -25,6 +25,14 @@ pub(crate) fn session_notification_to_events(notif: &SessionNotification) -> Vec
     match &notif.update {
         SessionUpdate::AgentMessageChunk(chunk) => {
             if let ContentBlock::Text(text) = &chunk.content {
+                if text.text.is_empty()
+                    && chunk
+                        .meta
+                        .as_ref()
+                        .is_some_and(|meta| meta.contains_key("goalState") || meta.contains_key("goalStatus"))
+                {
+                    return events;
+                }
                 events.push(AgentStreamEvent::Text(TextEventData {
                     content: text.text.clone(),
                 }));

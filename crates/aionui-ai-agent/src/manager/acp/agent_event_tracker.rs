@@ -79,6 +79,7 @@ impl AcpAgentManager {
     }
 
     async fn apply_notification_to_session(&self, notif: &SessionNotification) {
+        self.apply_goal_notification(notif).await;
         // Translate the SDK notification into AgentStreamEvent shapes, then
         // dispatch through the existing apply logic.
         // A future Stage 3b can collapse this round-trip to consume SessionUpdate

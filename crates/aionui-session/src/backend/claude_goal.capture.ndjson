@@ -1,0 +1,6 @@
+{"direction": "in", "frame": {"type": "control_request", "request_id": "probe-init", "request": {"subtype": "initialize"}}}
+{"direction": "out", "frame": {"type": "active_goal", "value": null, "uuid": "3294ea52-b56f-4365-9bee-8ef081857d27", "session_id": "3cd7309d-a714-4746-b673-15918e93d365"}}
+{"direction": "in", "frame": {"type": "user", "message": {"role": "user", "content": "/goal Wait for the local Goal protocol probe. Do not use tools."}, "parent_tool_use_id": null, "priority": "now"}}
+{"direction": "out", "frame": {"type": "active_goal", "value": {"condition": "Wait for the local Goal protocol probe. Do not use tools.", "iterations": 0, "set_at": 1793848559452, "tokens_at_start": 0}, "uuid": "d8d6780a-d89a-4543-ad53-339b3ce1f478", "session_id": "3cd7309d-a714-4746-b673-15918e93d365"}}
+{"direction": "in", "frame": {"type": "user", "message": {"role": "user", "content": "/goal clear"}, "parent_tool_use_id": null, "priority": "now"}}
+{"direction": "out", "frame": {"type": "active_goal", "value": null, "uuid": "bd22c556-3be1-4231-b066-cfc3b13222ba", "session_id": "3cd7309d-a714-4746-b673-15918e93d365"}}

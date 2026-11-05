@@ -43,7 +43,7 @@ pub(crate) async fn publish_goal(
         "conversation.goalChanged",
         serde_json::json!({
             "conversation_id": conversation_id, "user_id": user_id,
-            "goal": snapshot.goal, "revision": snapshot.revision,
+            "goal": snapshot.goal, "revision": snapshot.revision, "actions": snapshot.actions,
         }),
     ));
     Ok(())
@@ -59,15 +59,23 @@ impl ConversationService {
             publish_goal(self.conversation_repo(), self.broadcaster(), user_id, id, &snapshot).await?;
         }
         // Reopening history never creates a task.
-        match self
+        let mut snapshot = match self
             .conversation_repo()
             .get_message_by_msg_id(user_id, id, &format!("{id}:goal"), "acp_goal")
             .await?
         {
             Some(row) => serde_json::from_str(&row.content)
-                .map_err(|_| ConversationError::internal("Invalid persisted goal snapshot")),
-            None => Ok(ConversationGoalSnapshot::default()),
+                .map_err(|_| ConversationError::internal("Invalid persisted goal snapshot"))?,
+            None => ConversationGoalSnapshot::default(),
+        };
+        // Capability discovery is read-only and does not imply an empty Goal.
+        // In particular, never clear a persisted objective just to attach actions.
+        if let Ok(task) = self.task(id)
+            && let Some(actions) = task.goal_actions()
+        {
+            snapshot.actions = Some(actions);
         }
+        Ok(snapshot)
     }
 
     pub async fn set_goal(
@@ -163,6 +171,7 @@ mod goal_tests {
         assert_eq!(event.data["conversation_id"], row.id);
         assert!(event.data["goal"].get("threadId").is_none());
         let cleared = ConversationGoalSnapshot {
+            actions: None,
             goal: None,
             revision: 101,
         };
@@ -195,6 +204,7 @@ mod goal_tests {
                 "different-user",
                 &row.id,
                 &ConversationGoalSnapshot {
+                    actions: None,
                     goal: None,
                     revision: 102
                 }

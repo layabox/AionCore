@@ -565,6 +565,9 @@ pub enum RequiredFullAutoApplication {
 }
 
 pub struct AcpAgentManager {
+    pub(super) goal_running: std::sync::atomic::AtomicBool,
+    pub(super) goal_cache: std::sync::Mutex<aionui_session::GoalCache>,
+    pub(super) goal_operation_lock: Mutex<()>,
     /// Pre-computed, immutable session parameters assembled by the factory.
     pub(super) params: Arc<AcpSessionParams>,
 
@@ -608,7 +611,7 @@ pub struct AcpAgentManager {
     pub(super) process: Arc<CliAgentProcess>,
 
     /// Mutex for serializing session operations (new/load/send).
-    session_lock: Mutex<()>,
+    pub(super) session_lock: Mutex<()>,
 }
 
 impl AcpAgentManager {
@@ -691,6 +694,9 @@ impl AcpAgentManager {
         let pipeline = PromptPipeline::new(vec![Arc::new(SessionNewPreludeHook)]);
 
         let manager = Self {
+            goal_running: std::sync::atomic::AtomicBool::new(false),
+            goal_cache: std::sync::Mutex::new(aionui_session::GoalCache::default()),
+            goal_operation_lock: Mutex::new(()),
             params,
             session: RwLock::new(session),
             runtime,
@@ -1260,7 +1266,7 @@ impl AcpAgentManager {
     /// 2. Sid present but CLI has not opened it (fresh task) → `open_session_resume`
     /// 3. Already opened → noop, return the existing sid
     #[tracing::instrument(skip_all, fields(conversation_id = %self.params.conversation_id))]
-    async fn ensure_session_opened(&self) -> Result<String, AgentError> {
+    pub(super) async fn ensure_session_opened(&self) -> Result<String, AgentError> {
         debug!("Ensuring ACP session is opened");
         let _lock = self.session_lock.lock().await;
         self.ensure_protocol_connected_for_operation("ensure_session_opened")?;
@@ -1461,6 +1467,13 @@ impl crate::agent_task::IAgentTask for AcpAgentManager {
 
     fn status(&self) -> Option<ConversationStatus> {
         self.runtime.status()
+    }
+
+    fn live_background_tasks(&self) -> usize {
+        usize::from(self.goal_snapshot().is_some_and(|s| {
+            s.goal
+                .is_some_and(|g| matches!(g.status, aionui_api_types::ConversationGoalStatus::Active))
+        }))
     }
 
     fn last_activity_at(&self) -> TimestampMs {

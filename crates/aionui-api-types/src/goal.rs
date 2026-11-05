@@ -6,8 +6,10 @@ pub struct ConversationGoal {
     pub objective: String,
     pub status: ConversationGoalStatus,
     pub token_budget: Option<u64>,
-    pub tokens_used: u64,
-    pub time_used_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_used: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_used_seconds: Option<u64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -21,10 +23,13 @@ pub enum ConversationGoalStatus {
     UsageLimited,
     BudgetLimited,
     Complete,
+    Limited,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConversationGoalSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<Vec<String>>,
     pub goal: Option<ConversationGoal>,
     pub revision: u64,
 }

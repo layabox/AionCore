@@ -466,9 +466,17 @@ impl AgentInstance {
         }
     }
 
+    pub fn goal_actions(&self) -> Option<Vec<String>> {
+        match self {
+            Self::Acp(task) => task.goal_actions(),
+            _ => self.goal_snapshot().and_then(|snapshot| snapshot.actions),
+        }
+    }
+
     pub fn goal_snapshot(&self) -> Option<aionui_api_types::ConversationGoalSnapshot> {
         match self {
             Self::Session(task) => task.goal_snapshot(),
+            Self::Acp(task) => task.goal_snapshot(),
             _ => None,
         }
     }
@@ -479,6 +487,7 @@ impl AgentInstance {
     ) -> Result<aionui_api_types::ConversationGoalSnapshot, AgentError> {
         match self {
             Self::Session(task) => task.goal_operation(operation).await,
+            Self::Acp(task) => task.goal_operation(operation).await,
             _ => Err(AgentError::bad_request("Goals are not supported by this agent")),
         }
     }

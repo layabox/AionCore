@@ -693,7 +693,7 @@ impl ConversationService {
     pub(crate) fn ensure_background_watcher(&self, user_id: &str, conversation_id: &str, agent: &AgentInstance) {
         let (instance_ptr, title_only) = match agent {
             AgentInstance::Session(task) => (Arc::as_ptr(task) as usize, false),
-            AgentInstance::Acp(mgr) => (Arc::as_ptr(mgr) as usize, true),
+            AgentInstance::Acp(mgr) => (Arc::as_ptr(mgr) as usize, !mgr.supports_goal_stream()),
             _ => return,
         };
         let mut map = match self.background_watchers.lock() {

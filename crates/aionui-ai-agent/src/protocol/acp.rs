@@ -106,6 +106,12 @@ fn build_initialize_request() -> InitializeRequest {
     session_caps.config_options = Some(SessionConfigOptionsCapabilities::default());
     let mut caps = ClientCapabilities::default();
     caps.terminal = true;
+    // Opt into the documented experimental Goal wire, while keeping our own
+    // clientInfo identity and declaring no unrelated AIR features.
+    caps.meta = Some(
+        serde_json::from_value(serde_json::json!({"goal":{},"jetbrains":{"air":{"version":1,"capabilities":[]}}}))
+            .expect("static Goal capability"),
+    );
     caps.session = Some(session_caps);
     InitializeRequest::new(ProtocolVersion::LATEST)
         .client_info(Implementation::new(ACP_CLIENT_NAME, ACP_CLIENT_VERSION))
@@ -404,6 +410,45 @@ impl AcpProtocol {
         self.send_request(req, AGENT_METHOD_NAMES.authenticate).await
     }
 
+    /// Send only a validated Goal extension method. No prompt/tool payload logs.
+    pub(crate) fn start_goal_rpc(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<oneshot::Receiver<Result<serde_json::Value, AcpError>>, AcpError> {
+        self.ensure_connected()?;
+        let request = UntypedMessage::new(method, params).map_err(|e| AcpError::from_sdk(e, method))?;
+        let connection = self.connection.clone();
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let result = connection
+                .send_request(request)
+                .block_task()
+                .await
+                .map_err(|e| AcpError::from_sdk(e, "goal"));
+            if tx.send(result).is_err() {
+                tracing::debug!("Goal RPC settled after state confirmation");
+            }
+        });
+        Ok(rx)
+    }
+
+    pub(crate) async fn goal_rpc(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, AcpError> {
+        let rx = self.start_goal_rpc(method, params)?;
+        match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+            Ok(Ok(result)) => result,
+            _ => Err(AcpError::AgentInternal {
+                message: "Goal request did not complete".into(),
+                code: -32603,
+                data: None,
+            }),
+        }
+    }
+
     /// Send an extension request (method name must start with `_`).
     ///
     /// Returns the raw JSON response value from the agent.
@@ -630,25 +675,30 @@ async fn run_sdk_background(
     // writes). Only the two recognised shapes are absorbed; every other line,
     // including genuinely malformed input, is forwarded unchanged.
     let dialect_event_tx = event_tx.clone();
+    let goal_wire_sequence = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let incoming = FramedRead::new(stdout, LinesCodec::new())
         .map_err(std::io::Error::other)
         .filter_map(move |line: std::io::Result<String>| {
             let dialect_event_tx = dialect_event_tx.clone();
+            let goal_wire_sequence = goal_wire_sequence.clone();
             async move {
                 match line {
-                    Ok(line) => match acp_dialect::classify_incoming_line(&line) {
-                        acp_dialect::LineDisposition::Forward(line) => Some(Ok(line)),
-                        acp_dialect::LineDisposition::Absorb(kind) => {
-                            log_acp_dialect_absorbed(kind, &line);
-                            // `broadcast::send` is synchronous and non-blocking; a
-                            // send error only means no active subscriber for this
-                            // turn (nothing to correlate against), which is fine.
-                            let _ = dialect_event_tx.send(AgentStreamEvent::AcpDialectSignal(
-                                stream_event::AcpDialectSignalData { kind },
-                            ));
-                            None
+                    Ok(line) => {
+                        let line = super::goal_wire::stamp(line, &goal_wire_sequence);
+                        match acp_dialect::classify_incoming_line(&line) {
+                            acp_dialect::LineDisposition::Forward(line) => Some(Ok(line)),
+                            acp_dialect::LineDisposition::Absorb(kind) => {
+                                log_acp_dialect_absorbed(kind, &line);
+                                // `broadcast::send` is synchronous and non-blocking; a
+                                // send error only means no active subscriber for this
+                                // turn (nothing to correlate against), which is fine.
+                                let _ = dialect_event_tx.send(AgentStreamEvent::AcpDialectSignal(
+                                    stream_event::AcpDialectSignalData { kind },
+                                ));
+                                None
+                            }
                         }
-                    },
+                    }
                     Err(err) => Some(Err(err)),
                 }
             }

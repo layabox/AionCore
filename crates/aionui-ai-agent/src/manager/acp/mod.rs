@@ -7,6 +7,7 @@ pub mod catalog_forwarder;
 pub(crate) mod config_option_catalog;
 pub(crate) mod config_options;
 mod error_mapping;
+mod goal_operations;
 pub mod hooks;
 pub mod legacy_session_model;
 pub(crate) mod mode_normalize;

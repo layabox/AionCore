@@ -312,10 +312,17 @@ impl BackendConnection for ClaudeConnection {
     async fn open_session(
         &self,
         spec: SessionSpec,
-        config: SessionConfig,
+        mut config: SessionConfig,
     ) -> Result<Arc<dyn SessionBackend>, BackendError> {
         let (logical_id, claude_session_id, legacy_spec) = Self::to_legacy_spec(&spec);
         let adapter = ClaudeAdapter::new();
+        // Verified: claude-native-2.1.267-remote-goal.ndjson. This opts into
+        // structured active_goal state; without it native stdio omits Goal events.
+        config.spawn_env.retain(|v| v.name != "CLAUDE_CODE_REMOTE");
+        config.spawn_env.push(aionui_common::EnvVar {
+            name: "CLAUDE_CODE_REMOTE".into(),
+            value: "1".into(),
+        });
 
         // Build the init flags claude is spawned with from the session-init surface
         // (MCP / preset / model / permission-mode). The clean-slate seam owns this
@@ -394,6 +401,7 @@ impl BackendConnection for ClaudeConnection {
 /// `Mutex` (a microsecond frame-write lock, NOT a per-turn lock), and `turn_gen`
 /// is an atomic the dispatch path bumps + the reader task reads.
 pub struct ClaudeSessionBackend {
+    goal_operation_lock: Mutex<()>,
     session_id: String,
     capabilities: Capabilities,
     /// Retained stdin for prompt/control delivery. `BoxedStdin` taken once from
@@ -746,6 +754,7 @@ struct ClaudeWakeRecipe {
 /// on the control_response, merged by `capabilities()` on read. Default empty.
 #[derive(Clone, Default)]
 struct DiscoveredCaps {
+    goal_cache: super::GoalCache,
     models: Vec<crate::capability::ModelInfo>,
     slash_commands: Vec<crate::capability::SlashCommandInfo>,
     /// Row id → the CONCRETE model that row resolves to, from the initialize
@@ -1008,6 +1017,7 @@ impl ClaudeSessionBackend {
 
         Self {
             session_id,
+            goal_operation_lock: Mutex::new(()),
             capabilities,
             stdin,
             adapter,
@@ -1702,6 +1712,38 @@ async fn reader_task(
         let cur_gen = turn_gen.load(Ordering::SeqCst);
         for (raw, events) in batch {
             if let Some(v) = &raw {
+                if v["type"] == "active_goal" {
+                    if v["session_id"]
+                        .as_str()
+                        .is_some_and(|id| id != *wake_session_slot.lock().unwrap_or_else(|e| e.into_inner()))
+                    {
+                        continue;
+                    }
+                    if let Some(value) = v.get("value") {
+                        let normalized = super::claude_goal(value);
+                        let snapshot = normalized.and_then(|value| {
+                            discovered_caps
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .goal_cache
+                                .standard(&value, &session_id, vec!["set".into(), "clear".into()])
+                        });
+                        match snapshot {
+                            Ok(snapshot) => {
+                                let _ = event_tx.send(SessionEnvelope {
+                                    session_id: session_id.clone(),
+                                    turn_gen: cur_gen,
+                                    event: SessionEvent::AdapterSpecific {
+                                        tag: "goal".into(),
+                                        payload: serde_json::to_value(snapshot).unwrap_or_default(),
+                                    },
+                                });
+                            }
+                            Err(_) => tracing::warn!(session_id, "Invalid native Claude Goal event"),
+                        }
+                    }
+                    continue;
+                }
                 // Lock the open-turn epoch at the authoritative turn-open boundary
                 // (system/init). Every subsequent result of THIS turn is stamped with
                 // it until the next turn's init re-locks it (bug-A, see above).
@@ -3051,6 +3093,119 @@ fn sniff_task(
 
 #[async_trait::async_trait]
 impl SessionBackend for ClaudeSessionBackend {
+    fn goal_snapshot(&self) -> Option<super::SessionGoalSnapshot> {
+        self.discovered_caps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .goal_cache
+            .snapshot
+            .clone()
+    }
+
+    async fn goal_operation(
+        &self,
+        operation: super::GoalOperation,
+    ) -> Result<super::SessionGoalSnapshot, BackendError> {
+        if matches!(operation, super::GoalOperation::Read) {
+            return self
+                .goal_snapshot()
+                .ok_or(BackendError::CommandNotSupported { command: "goal" });
+        }
+        let _goal_guard = self.goal_operation_lock.lock().await;
+        // Explicit mutations may wake; GET never enters this path.
+        self.suspend
+            .ensure_awake(aionui_common::now_ms(), || self.wake_handle())
+            .await?;
+        for _ in 0..100 {
+            let ready = {
+                let caps = self.discovered_caps.lock().unwrap_or_else(|e| e.into_inner());
+                !caps.slash_commands.is_empty()
+            };
+            if ready {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        if !self
+            .discovered_caps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .slash_commands
+            .iter()
+            .any(|c| c.name == "goal")
+        {
+            return Err(BackendError::CommandNotSupported { command: "goal" });
+        }
+        let objective = match &operation {
+            super::GoalOperation::Set {
+                objective: Some(objective),
+                status,
+                token_budget: None,
+            } if status.as_deref().is_none_or(|s| s == "active") => Some(objective.trim().to_owned()),
+            super::GoalOperation::Clear => None,
+            _ => return Err(BackendError::CommandNotSupported { command: "goal action" }),
+        };
+        if objective.as_ref().is_some_and(|s| s.is_empty() || s == "clear") {
+            return Err(BackendError::Transport("Invalid Claude Goal objective".into()));
+        }
+        if objective.is_none()
+            && let Some(snapshot) = self.goal_snapshot()
+            && snapshot.goal.is_none()
+        {
+            return Ok(snapshot);
+        }
+        let revision = self.goal_snapshot().map_or(0, |s| s.revision);
+        let command = objective
+            .as_ref()
+            .map_or_else(|| "/goal clear".to_owned(), |o| format!("/goal {o}"));
+        // Verified: official claude-agent-acp/acp-agent.ts goal()/steer(); native capture.
+        let frame = serde_json::json!({"type":"user","message":{"role":"user","content":command},"parent_tool_use_id":null,"priority":"now"});
+        let was_running = self.turn_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst);
+        if !was_running {
+            self.turn_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        let write = async {
+            use tokio::io::AsyncWriteExt;
+            let mut guard = self.stdin.lock().await;
+            let stdin = guard
+                .as_mut()
+                .ok_or_else(|| BackendError::Transport("Claude stdin unavailable".into()))?;
+            let mut bytes =
+                serde_json::to_vec(&frame).map_err(|_| BackendError::Transport("Invalid Goal request".into()))?;
+            bytes.push(b'\n');
+            stdin
+                .write_all(&bytes)
+                .await
+                .map_err(|e| BackendError::Transport(e.to_string()))?;
+            stdin.flush().await.map_err(|e| BackendError::Transport(e.to_string()))
+        }
+        .await;
+        if write.is_err() {
+            self.turn_in_flight
+                .store(was_running, std::sync::atomic::Ordering::SeqCst);
+        }
+        write?;
+        tracing::info!(conversation_id = %self.session_id, action = if objective.is_some() { "set" } else { "clear" }, "Native Goal operation sent");
+        // Wait for provider state, never invent an active Goal from submitted text.
+        for _ in 0..600 {
+            if let Some(snapshot) = self.goal_snapshot()
+                && snapshot.revision > revision
+            {
+                let confirmed = match (&objective, &snapshot.goal) {
+                    (None, None) => true,
+                    (Some(o), Some(g)) => g.objective == *o,
+                    _ => false,
+                };
+                if confirmed {
+                    return Ok(snapshot);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        Err(BackendError::Transport(
+            "Claude did not confirm the Goal operation".into(),
+        ))
+    }
     /// Force-kill path (`UserCancelTimeout`): delegate to the suspend
     /// controller's unconditional teardown (abort reader → group-kill the
     /// claude CLI process tree), so the process dies even while an orchestrator
@@ -4137,6 +4292,49 @@ mod tests {
         assert!(
             matches!(legacy, LegacySessionSpec::Fresh(ref id) if id == &claude_id),
             "lost backend session → Fresh rebind with the minted id, got {legacy:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_goal_capture_flows_through_reader_and_read_is_side_effect_free() {
+        let frames: Vec<serde_json::Value> = include_str!("claude_goal.capture.ndjson")
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|line: &serde_json::Value| line["direction"] == "out")
+            .map(|line| line["frame"].clone())
+            .collect();
+        let session = frames[0]["session_id"].as_str().unwrap();
+        let mut fixture = Vec::new();
+        for frame in &frames {
+            fixture.extend(serde_json::to_vec(frame).unwrap());
+            fixture.push(b'\n');
+        }
+        let io = FakeAgentIo::new(fixture, None);
+        let captured = io.captured_stdin();
+        io.release_exit();
+        let backend = ClaudeSessionBackend::build_with_io(session, Box::new(io)).await;
+        let mut events = backend.events();
+        let mut goals = Vec::new();
+        while let Ok(Some(envelope)) = tokio::time::timeout(std::time::Duration::from_secs(2), events.next()).await {
+            match envelope.event {
+                SessionEvent::AdapterSpecific { tag, payload } if tag == "goal" => goals.push(payload),
+                SessionEvent::Detached { .. } => break,
+                _ => {}
+            }
+        }
+        assert_eq!(goals.len(), 3, "initial empty state, authoritative set, explicit clear");
+        assert_eq!(
+            goals[1]["goal"]["objective"],
+            "Wait for the local Goal protocol probe. Do not use tools."
+        );
+        assert!(goals[1]["goal"].get("timeUsedSeconds").is_none());
+        assert!(goals[2]["goal"].is_null());
+        let snapshot = backend.goal_operation(super::super::GoalOperation::Read).await.unwrap();
+        assert!(snapshot.goal.is_none());
+        assert_eq!(snapshot.actions.unwrap(), ["set", "clear"]);
+        assert!(
+            captured.lock().await.is_empty(),
+            "Goal GET never writes or wakes the process"
         );
     }
 
@@ -6669,11 +6867,11 @@ mod tests {
         assert_eq!(tok.map(|e| e.value.as_str()), Some("tok-123"));
     }
 
-    /// #103 parity: an empty `spawn_env` (no cc-switch config, or a non-claude backend
-    /// the app never fills) yields an empty `CommandSpec.env` — byte-identical to the
-    /// pre-#103 spawn (inherit the parent env only).
+    /// No provider overrides are fabricated when spawn_env is empty. The native
+    /// structured Goal stream still needs its explicit opt-in (verified:
+    /// backend/claude_goal.capture.ndjson and docs/goal-protocol-sources.md).
     #[tokio::test]
-    async fn empty_spawn_env_yields_empty_command_env() {
+    async fn empty_spawn_env_only_enables_structured_goal_stream() {
         use crate::testing::FakeSpawner;
         let spawner = Arc::new(FakeSpawner::new());
         let conn = ClaudeConnection::new(spawner.clone());
@@ -6686,11 +6884,9 @@ mod tests {
             )
             .await;
         let spec = spawner.last_command().await.expect("a spawn was recorded");
-        assert!(
-            spec.env.is_empty(),
-            "no spawn_env → empty CommandSpec.env, got {:?}",
-            spec.env
-        );
+        assert_eq!(spec.env.len(), 1);
+        assert_eq!(spec.env[0].name, "CLAUDE_CODE_REMOTE");
+        assert_eq!(spec.env[0].value, "1");
     }
 
     /// F-4 #1-critical regression: a turn in flight (set by dispatch(Send)) must
