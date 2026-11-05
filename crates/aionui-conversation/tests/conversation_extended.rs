@@ -164,6 +164,7 @@ async fn goal_metadata_is_excluded_from_history_and_search() {
             ConversationGoalSnapshot {
                 goal: None,
                 revision: 101,
+                actions: None,
             },
         ] {
             state.content = serde_json::to_string(&saved).unwrap();
