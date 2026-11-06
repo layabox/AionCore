@@ -198,6 +198,17 @@ impl CliAgentProcess {
         *rx.borrow()
     }
 
+    /// Allow an exited child's stderr reader to drain, without waiting on a
+    /// wrapper's surviving descendants indefinitely.
+    pub(crate) async fn wait_for_stderr(&self, budget: Duration) {
+        let _ = tokio::time::timeout(budget, async {
+            while !self._stderr_handle.is_finished() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+    }
+
     /// Take the buffered stderr content (consuming).
     ///
     /// Returns the last [`STDERR_BUFFER_MAX`] bytes of stderr output.

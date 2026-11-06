@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [codex/mcp-permission-identity, main, codex/agent-launch-arguments, codex/agent-launch-arguments-verification]
+    branches: [codex/agent-test-diagnostics, codex/mcp-permission-identity, main, codex/agent-launch-arguments, codex/agent-launch-arguments-verification]
   pull_request:
     branches: [main]
 
@@ -57,6 +57,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1-rust
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
       - uses: taiki-e/install-action@nextest
       - name: Check launch argument persistence and isolation
         run: cargo test -p aionui-db --lib launch_arguments --locked

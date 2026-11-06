@@ -89,7 +89,8 @@ pub async fn try_connect_custom_agent_with_catalog(
         Err(msg) => return (TryConnectCustomAgentResponse::FailAcp { error: msg }, None),
     };
 
-    let outcome = match tokio::time::timeout(STEP2_TIMEOUT, run_handshake(&proc)).await {
+    let mut stage = "initialize";
+    let mut outcome = match tokio::time::timeout(STEP2_TIMEOUT, run_handshake(&proc, &mut stage)).await {
         Ok(outcome) => {
             let catalog = match &outcome {
                 ProbeOutcome::Ok(catalog) => catalog.clone(),
@@ -99,11 +100,27 @@ pub async fn try_connect_custom_agent_with_catalog(
         }
         Err(_) => (
             TryConnectCustomAgentResponse::FailAcp {
-                error: format!("ACP handshake did not complete within {}s", STEP2_TIMEOUT.as_secs()),
+                error: format!("ACP {stage} did not complete within {}s", STEP2_TIMEOUT.as_secs()),
             },
             None,
         ),
     };
+
+    // Collect before cleanup: a signal sent by us is not the cause of failure.
+    // The transport can close before the exit/stderr tasks have been scheduled.
+    if let TryConnectCustomAgentResponse::FailAcp { error } | TryConnectCustomAgentResponse::FailAuth { error } =
+        &mut outcome.0
+    {
+        let exit = tokio::time::timeout(Duration::from_millis(200), proc.wait_for_exit())
+            .await
+            .ok()
+            .flatten();
+        if exit.is_some() {
+            proc.wait_for_stderr(Duration::from_millis(100)).await;
+        }
+        let stderr = proc.peek_stderr_tail(40).await;
+        *error = super::probe_diagnostics::format_probe_failure(error, exit, &stderr, env);
+    }
 
     // Always tear down the whole process group. `kill_on_drop(true)` only
     // signals the direct child (e.g. `npm exec ...`) — wrapper CLIs spawn
@@ -182,7 +199,7 @@ impl ProbeOutcome {
     }
 }
 
-async fn run_handshake(proc: &CliAgentProcess) -> ProbeOutcome {
+async fn run_handshake(proc: &CliAgentProcess, stage: &mut &'static str) -> ProbeOutcome {
     let Some((stdin, stdout)) = proc.take_stdio().await else {
         return ProbeOutcome::Fail("stdio not available after spawn_for_sdk".to_string());
     };
@@ -224,17 +241,8 @@ async fn run_handshake(proc: &CliAgentProcess) -> ProbeOutcome {
             Err(e) => return ProbeOutcome::Fail(format!("ACP initialize failed: {e}")),
         },
         exit = proc.wait_for_exit() => {
-            let stderr = proc.take_stderr().await;
-            let stderr = stderr.trim();
-            let status = match exit {
-                Some(s) => format!("{s}"),
-                None => "unknown".to_string(),
-            };
-            return if stderr.is_empty() {
-                ProbeOutcome::Fail(format!("CLI exited before ACP initialize completed (status={status})"))
-            } else {
-                ProbeOutcome::Fail(format!("CLI exited before ACP initialize completed (status={status}): {stderr}"))
-            };
+            let status = exit.map(|s| s.to_string()).unwrap_or_else(|| "unknown".into());
+            return ProbeOutcome::Fail(format!("CLI exited before ACP initialize completed (status={status})"));
         }
     };
 
@@ -245,6 +253,7 @@ async fn run_handshake(proc: &CliAgentProcess) -> ProbeOutcome {
     // config options, which the caller persists into `agent_metadata` so the
     // picker is populated before the user ever opens a conversation. Discarding
     // it meant a probed-online agent still showed an empty picker.
+    *stage = "session/new";
     let outcome = match protocol.new_session(NewSessionRequest::new(std::env::temp_dir())).await {
         Ok((response, legacy_models)) => {
             // Same extraction the live session path performs (`agent_session_flow`):
@@ -279,6 +288,104 @@ async fn run_handshake(proc: &CliAgentProcess) -> ProbeOutcome {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_diagnostics_capture_early_exit_and_stderr() {
+        let env = HashMap::from([("PROBE_TEST_SECRET".into(), "private-value".into())]);
+        let args = vec!["-c".into(),
+            "printf 'Error: Cannot find module /cache/_npx/test/module.js\\nPROBE_TEST_SECRET=private-value\\n' >&2; exit 23".into()];
+        // Repeat to cover either winner of the transport-close/exit race.
+        for _ in 0..5 {
+            let resp = try_connect_custom_agent("sh", &args, &env, None).await;
+            let TryConnectCustomAgentResponse::FailAcp { error } = resp else {
+                panic!("expected ACP failure");
+            };
+            assert!(error.contains("23"), "{error}");
+            assert!(
+                error.contains("Cannot find module /cache/_npx/test/module.js"),
+                "{error}"
+            );
+            assert!(error.contains("CLI stderr:"), "{error}");
+            assert!(!error.contains("private-value"), "{error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_diagnostics_closed_stdout_does_not_wait_for_process_exit() {
+        let args = vec![
+            "-c".into(),
+            "printf 'startup failed\\n' >&2; exec 1>&-; sleep 60".into(),
+        ];
+        let resp = try_connect_custom_agent("sh", &args, &HashMap::new(), None).await;
+        let TryConnectCustomAgentResponse::FailAcp { error } = resp else {
+            panic!("expected ACP failure");
+        };
+        assert!(
+            error.contains("no exit status observed before probe cleanup"),
+            "{error}"
+        );
+        assert!(error.contains("startup failed"), "{error}");
+        // A global wall-clock bound also measured command lookup and process
+        // tree cleanup (which already has a separate five-second budget).
+        // Observing no exit status proves collection did not await sleep's exit.
+        assert!(error.starts_with("ACP initialize failed"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn probe_diagnostics_session_failure_and_success() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("probe.cjs");
+        std::fs::write(
+            &script,
+            r#"
+const mode = process.argv[2];
+if (mode === 'early-exit') { console.error('Cannot find module /cache/_npx/test/module.js'); process.exit(23); }
+require('readline').createInterface({ input: process.stdin }).on('line', line => {
+  const request = JSON.parse(line);
+  const reply = result => console.log(JSON.stringify({jsonrpc:'2.0', id:request.id, result}));
+  if (request.method === 'initialize') reply({protocolVersion:1, agentCapabilities:{}, authMethods:[]});
+  if (request.method === 'session/new') {
+    if (mode === 'success') reply({sessionId:'probe-test'});
+    else if (mode === 'timeout') console.error('Session waiting for dependency');
+    else {
+      console.error('Error: Cannot load session dependency');
+      console.log(JSON.stringify({jsonrpc:'2.0', id:request.id, error:{code:-32603, message:'test session failed'}}));
+    }
+  }
+});
+"#,
+        )
+        .unwrap();
+        let node = aionui_runtime::resolve_command_path("node").expect("Node is installed by the CI workflow");
+        for mode in ["failure", "success", "early-exit", "timeout"] {
+            let args = vec![script.to_string_lossy().into_owned(), mode.into()];
+            let resp = try_connect_custom_agent(node.to_str().unwrap(), &args, &HashMap::new(), None).await;
+            match (mode, resp) {
+                ("success", TryConnectCustomAgentResponse::Success) => {}
+                ("failure", TryConnectCustomAgentResponse::FailAcp { error }) => {
+                    assert!(error.starts_with("ACP session/new failed"), "{error}");
+                    assert!(error.contains("Cannot load session dependency"), "{error}");
+                }
+                ("early-exit", TryConnectCustomAgentResponse::FailAcp { error }) => {
+                    assert!(error.contains("23"), "{error}");
+                    assert!(
+                        error.contains("Cannot find module /cache/_npx/test/module.js"),
+                        "{error}"
+                    );
+                }
+                ("timeout", TryConnectCustomAgentResponse::FailAcp { error }) => {
+                    assert!(
+                        error.starts_with("ACP session/new did not complete within 35s"),
+                        "{error}"
+                    );
+                    assert!(error.contains("Session waiting for dependency"), "{error}");
+                }
+                (_, other) => panic!("unexpected probe outcome: {other:?}"),
+            }
+        }
+    }
 
     #[tokio::test]
     async fn probe_returns_fail_cli_when_command_missing() {

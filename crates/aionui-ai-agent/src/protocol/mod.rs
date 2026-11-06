@@ -7,4 +7,5 @@ pub(crate) mod error;
 pub mod events;
 mod goal_wire;
 pub(crate) mod npx_cache_repair;
+mod probe_diagnostics;
 pub mod send_error;
