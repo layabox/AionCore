@@ -1,0 +1,11 @@
+{
+  "cli": "0.161.0",
+  "capturedAt": "2026-11-09",
+  "ephemeral": true,
+  "inferenceTurns": 0,
+  "observations": [
+    { "requested": { "permissions": ":danger-full-access" }, "approvalPolicy": "on-request", "activePermissionProfile": { "id": ":danger-full-access", "extends": null } },
+    { "requested": { "permissions": ":danger-full-access", "approvalPolicy": "never" }, "approvalPolicy": "never", "activePermissionProfile": { "id": ":danger-full-access", "extends": null } },
+    { "requested": { "permissions": ":workspace", "approvalPolicy": "on-request" }, "approvalPolicy": "on-request", "activePermissionProfile": { "id": ":workspace", "extends": null } }
+  ]
+}

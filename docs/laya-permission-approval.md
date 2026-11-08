@@ -9,6 +9,10 @@ must still be answered explicitly.
 
 Verified source: installed Codex CLI 0.161.0's experimental generated
 `docs/protocol-schemas/codex-0.161.0/ThreadSettingsUpdateParams.json`.
+An ephemeral native session with zero inference turns confirmed that changing
+only the profile leaves `approvalPolicy: on-request`; sending both fields changes
+it to `never`. Switching back with both fields restores `on-request`. Sanitized
+observations are recorded in `permission-policy.live.json` beside the schema.
 
 Always Allow previously always sent `acceptForSession`. The native schema scopes
 that decision to its session approval cache. When a command offers a proposed
