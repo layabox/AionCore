@@ -1,7 +1,7 @@
 name: LayaAir ACPCore runtime
 on:
   push:
-    branches: [codex/agent-test-diagnostics, codex/goal-status, codex/mcp-permission-identity, codex/fast-mode, codex/request-user-input, codex/agent-launch-arguments, codex/skill-path-containment]
+    branches: [codex/permission-approval, codex/agent-test-diagnostics, codex/goal-status, codex/mcp-permission-identity, codex/fast-mode, codex/request-user-input, codex/agent-launch-arguments, codex/skill-path-containment]
   workflow_dispatch:
 permissions:
   contents: read
@@ -49,6 +49,8 @@ jobs:
       - run: cargo test -p aionui-conversation --lib goal_ --locked
       - run: cargo test -p aionui-conversation --test conversation_extended goal_metadata --locked
       - run: cargo test -p aionui-session --lib service_tier --locked
+      - run: cargo test -p aionui-session --lib command_always_allow --locked
+      - run: cargo test -p aionui-session --lib command_approval_policy --locked
       - run: cargo test -p aionui-session --lib codex_questions --locked
       - run: cargo test -p aionui-session --lib spawner --locked
       - run: cargo test -p aionui-ai-agent --lib service_tier --locked

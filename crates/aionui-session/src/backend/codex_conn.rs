@@ -2947,6 +2947,27 @@ fn mcp_tool_approval_server(input: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Use only the native proposed prefix and respect an explicit decision list.
+/// Verified: docs/protocol-schemas/codex-0.161.0/CommandExecutionRequestApprovalParams.json.
+/// Never derive a shell prefix from the command body or reuse a previous request.
+fn command_execpolicy_amendment(params: Option<&Value>) -> Option<Vec<String>> {
+    let params = params?;
+    let prefix = params.get("proposedExecpolicyAmendment")?.as_array()?;
+    let prefix = prefix
+        .iter()
+        .map(|part| part.as_str().map(str::to_owned))
+        .collect::<Option<Vec<_>>>()?;
+    if prefix.is_empty() || prefix.iter().any(|part| part.is_empty() || part.contains('\0')) {
+        return None;
+    }
+    let decision = json!({ "acceptWithExecpolicyAmendment": { "execpolicy_amendment": prefix } });
+    match params.get("availableDecisions") {
+        None | Some(Value::Null) => Some(prefix),
+        Some(Value::Array(options)) if options.contains(&decision) => Some(prefix),
+        _ => None,
+    }
+}
+
 /// Reverse-RPC handler (A2/A3). The blocking ServerRequest MUST eventually get a
 /// JSON-RPC RESPONSE (same `id`) or the channel deadlocks and the turn hangs.
 /// THREE classes:
@@ -3042,6 +3063,11 @@ async fn handle_reverse_rpc(
                 PendingCodexRequest::Approval {
                     title: title.to_string(),
                     mcp_server_name: None,
+                    execpolicy_amendment: if method == "item/commandExecution/requestApproval" {
+                        command_execpolicy_amendment(frame.get("params"))
+                    } else {
+                        None
+                    },
                 },
             );
             emit(
@@ -3097,6 +3123,7 @@ async fn handle_reverse_rpc(
                 PendingCodexRequest::Approval {
                     title: "Elicitation".to_string(),
                     mcp_server_name: mcp_tool_approval_server(&input),
+                    execpolicy_amendment: None,
                 },
             );
             emit(
@@ -4729,12 +4756,19 @@ impl SessionBackend for CodexSessionBackend {
                     .lock()
                     .await
                     .insert(id, format!("mode\u{2192}{profile_id}"));
+                let mut params = json!({ "threadId": tid, "permissions": profile_id });
+                // Verified: docs/protocol-schemas/codex-0.161.0/ThreadSettingsUpdateParams.json.
+                // The permission profile and approval policy are independent axes.
+                // Restore the gate when leaving full access; custom profiles retain
+                // their configured policy instead of being assigned a guessed one.
+                match profile_id.as_str() {
+                    ":danger-full-access" => params["approvalPolicy"] = json!("never"),
+                    ":workspace" | ":read-only" => params["approvalPolicy"] = json!("on-request"),
+                    _ => {}
+                }
                 let frame = json!({
                     "jsonrpc": "2.0", "id": id, "method": "thread/settings/update",
-                    "params": {
-                        "threadId": tid,
-                        "permissions": profile_id
-                    }
+                    "params": params
                 });
                 self.write_frame(frame).await?;
                 Ok(CommandReceipt {
@@ -4957,15 +4991,31 @@ impl SessionBackend for CodexSessionBackend {
                     decision,
                     super::types::PermissionDecision::Approved | super::types::PermissionDecision::AllowAlways
                 );
-                // codex CommandExecution/FileChangeApprovalDecision: accept (one-time)
-                // / acceptForSession (allow-always, no re-prompt) / decline. Map
-                // AllowAlways → acceptForSession so "don't ask again" persists for the
-                // session (was collapsed to a one-time accept → codex re-prompted every
-                // matching command). Schema: CommandExecutionRequestApprovalResponse.
-                let decision_str = match decision {
-                    super::types::PermissionDecision::AllowAlways => "acceptForSession",
-                    super::types::PermissionDecision::Approved => "accept",
-                    super::types::PermissionDecision::Denied => "decline",
+                // A native proposed execpolicy amendment covers future matching commands;
+                // acceptForSession only covers the native session cache's scope.
+                // Verified: docs/protocol-schemas/codex-0.161.0/CommandExecutionRequestApprovalResponse.json.
+                let decision_value = match decision {
+                    super::types::PermissionDecision::AllowAlways => {
+                        let amendment = self
+                            .pending_tool_approvals
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get(&request_id)
+                            .and_then(|entry| match entry {
+                                PendingCodexRequest::Approval {
+                                    execpolicy_amendment, ..
+                                } => execpolicy_amendment.clone(),
+                                _ => None,
+                            });
+                        match amendment {
+                            Some(prefix) => {
+                                json!({ "acceptWithExecpolicyAmendment": { "execpolicy_amendment": prefix } })
+                            }
+                            None => json!("acceptForSession"),
+                        }
+                    }
+                    super::types::PermissionDecision::Approved => json!("accept"),
+                    super::types::PermissionDecision::Denied => json!("decline"),
                 };
                 // An elicitation request (ELICIT_PREFIX) needs `{action, content}`;
                 // a command/file approval needs `{decision}`. Both keyed by the same
@@ -4986,7 +5036,7 @@ impl SessionBackend for CodexSessionBackend {
                     let id: Value = serde_json::from_str(&request_id).unwrap_or(Value::String(request_id.clone()));
                     json!({
                         "jsonrpc": "2.0", "id": id,
-                        "result": { "decision": decision_str }
+                        "result": { "decision": decision_value }
                     })
                 };
                 self.write_frame(frame).await?;
@@ -5232,14 +5282,17 @@ impl SessionBackend for CodexSessionBackend {
     /// duplicate live+recovered pair de-dups. Native questions carry the same
     /// normalized questions as the live Ask frame; answered questions are excluded;
     /// the raw command body is NOT exposed (TIO-13). Only the approval-class
-    /// title and verified ordinary-MCP Server identity are retained.
+    /// title and verified ordinary-MCP Server identity are exposed. A proposed
+    /// command prefix remains private in the pending entry until the user answers.
     fn pending_permission_requests(&self) -> Vec<PendingPermissionView> {
         self.pending_tool_approvals
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter_map(|(request_id, request)| match request {
-                PendingCodexRequest::Approval { title, mcp_server_name } => Some(PendingPermissionView {
+                PendingCodexRequest::Approval {
+                    title, mcp_server_name, ..
+                } => Some(PendingPermissionView {
                     mcp_server_name: mcp_server_name.clone(),
                     request_id: request_id.clone(),
                     tool_name: title.clone(),
@@ -6705,6 +6758,117 @@ mod tests {
             !request_id.starts_with(ELICIT_PREFIX),
             "a command approval must NOT be elicit-prefixed (it answers with {{decision}}), got {request_id}"
         );
+    }
+
+    #[tokio::test]
+    async fn command_always_allow_uses_only_native_proposed_prefix() {
+        for method in [
+            "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval",
+        ] {
+            for decision in [
+                crate::PermissionDecision::AllowAlways,
+                crate::PermissionDecision::Approved,
+                crate::PermissionDecision::Denied,
+            ] {
+                let amendment = json!({ "acceptWithExecpolicyAmendment": { "execpolicy_amendment": ["node", "scripts/check.js"] } });
+                let frame = json!({ "jsonrpc": "2.0", "id": 61, "method": method, "params": {
+                    "command": "node scripts/check.js --first", "proposedExecpolicyAmendment": ["node", "scripts/check.js"],
+                    "availableDecisions": ["accept", "acceptForSession", amendment, "decline"]
+                } });
+                let fake = FakeAgentIo::never_exits(Vec::new()).with_gated_tail(format!("{frame}\n").into_bytes());
+                let release = fake.stdout_releaser();
+                let captured = fake.captured_stdin();
+                let backend = CodexSessionBackend::build_with_io("command-approval", Box::new(fake)).await;
+                let mut events = backend.events();
+                release();
+                tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    while let Some(env) = events.next().await {
+                        if matches!(env.event, SessionEvent::Permission { .. }) {
+                            return;
+                        }
+                    }
+                    panic!("approval missing");
+                })
+                .await
+                .unwrap();
+                assert_eq!(backend.pending_permission_requests().len(), 1);
+                backend
+                    .dispatch(Command::AnswerPermission {
+                        request_id: "61".into(),
+                        decision: decision.clone(),
+                        selected: None,
+                        answers: vec![],
+                    })
+                    .await
+                    .unwrap();
+                let written = captured_str(&captured).await;
+                let answer: Value = written
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .find(|frame| frame.get("id") == Some(&json!(61)) && frame.get("result").is_some())
+                    .unwrap();
+                let expected = match decision {
+                    crate::PermissionDecision::AllowAlways if method == "item/commandExecution/requestApproval" => {
+                        amendment
+                    }
+                    crate::PermissionDecision::AllowAlways => json!("acceptForSession"),
+                    crate::PermissionDecision::Approved => json!("accept"),
+                    crate::PermissionDecision::Denied => json!("decline"),
+                };
+                assert_eq!(answer["result"]["decision"], expected);
+                assert!(backend.pending_permission_requests().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn command_always_allow_rejects_missing_malformed_or_unoffered_prefix() {
+        for input in [
+            json!({}),
+            json!({"proposedExecpolicyAmendment":[]}),
+            json!({"proposedExecpolicyAmendment":["node",7]}),
+            json!({"proposedExecpolicyAmendment":[""]}),
+            json!({"proposedExecpolicyAmendment":["node\u{0}bad"]}),
+            json!({"proposedExecpolicyAmendment":["node"], "availableDecisions":["accept", "acceptForSession"]}),
+            json!({"proposedExecpolicyAmendment":["node"], "availableDecisions":{}}),
+        ] {
+            assert_eq!(command_execpolicy_amendment(Some(&input)), None, "{input}");
+        }
+        assert_eq!(command_execpolicy_amendment(None), None);
+        assert_eq!(
+            command_execpolicy_amendment(Some(&json!({"proposedExecpolicyAmendment":["node"]}))),
+            Some(vec!["node".into()])
+        );
+    }
+
+    #[tokio::test]
+    async fn command_approval_policy_switches_with_builtin_mode() {
+        let fake = fake_with_binding("th-policy", None);
+        let captured = fake.captured_stdin();
+        let backend = CodexSessionBackend::build_with_io("codex-policy", Box::new(fake)).await;
+        for mode in ["full-access", "auto", "full-access", "read-only", ":team-review"] {
+            backend.dispatch(Command::SetMode { mode: mode.into() }).await.unwrap();
+        }
+        let written = captured_str(&captured).await;
+        let settings = written
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|frame| frame["method"] == "thread/settings/update")
+            .map(|frame| frame["params"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(settings.len(), 5);
+        for (params, (profile, approval)) in settings.iter().zip([
+            (":danger-full-access", Some("never")),
+            (":workspace", Some("on-request")),
+            (":danger-full-access", Some("never")),
+            (":read-only", Some("on-request")),
+            (":team-review", None),
+        ]) {
+            assert_eq!(params["permissions"], profile);
+            assert_eq!(params.get("approvalPolicy").and_then(Value::as_str), approval);
+            assert!(params.get("sandboxPolicy").is_none());
+        }
     }
 
     #[tokio::test]

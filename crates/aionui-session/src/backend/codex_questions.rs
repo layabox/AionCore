@@ -15,6 +15,7 @@ pub(super) enum PendingCodexRequest {
     Approval {
         title: String,
         mcp_server_name: Option<String>,
+        execpolicy_amendment: Option<Vec<String>>,
     },
     Question(CodexQuestionRequest),
     // Kept until serverRequest/resolved to absorb the server's acknowledgement
