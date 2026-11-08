@@ -5196,12 +5196,21 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let written = String::from_utf8(captured.lock().await.clone()).unwrap();
-            let response = written
-                .lines()
-                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                .find(|frame| frame["type"] == "control_response")
-                .unwrap();
+            let response = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    let written = String::from_utf8(captured.lock().await.clone()).unwrap();
+                    if let Some(frame) = written
+                        .lines()
+                        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                        .find(|frame| frame["type"] == "control_response")
+                    {
+                        return frame;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("control response was not captured by the transport");
             let body = &response["response"]["response"];
             assert_eq!(body["toolUseID"], "tool-rule");
             assert_eq!(

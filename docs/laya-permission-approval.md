@@ -44,8 +44,8 @@ logs provide diagnostics without adding command or prefix payloads to logs.
 
 Claude's native adapter now snapshots validated `permission_suggestions` and
 returns `updatedPermissions` only on Allow Always, with the SDK's user-permanent
-decision classification. Only additive allow rules/directories are accepted;
-no tool-input-derived rule or mode change is invented. Explicit matched ask
+decision classification. The complete official PermissionUpdate bundle is validated and returned,
+including native-proposed mode updates; no rule, directory or mode is invented. Explicit matched ask
 rules, native suppression, malformed bundles and questions never acquire a
 remembered approval. Live and REST-recovered cards omit Allow Always when the
 native request has no supported rule. This capability stays inside ACPCore;

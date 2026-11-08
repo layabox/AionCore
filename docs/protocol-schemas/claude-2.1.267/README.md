@@ -30,10 +30,12 @@ Primary sources read for the implementation:
   native bundle, respect forced asks and native suppression, distinguish
   temporary/permanent/rejected decisions.
 
-ACPCore accepts only additive allow rules/directories, validates the complete
-bundle, and keeps native destinations and rule content unchanged. A malformed
-bundle, explicit ask rule, suppression flag, question, mode switch, removal or
-replacement does not produce a remembered-approval option. Live and recovered
+ACPCore validates the complete official PermissionUpdate bundle and keeps all
+native destinations, rules, directory updates and proposed mode changes unchanged.
+The captured passing bundle includes `setMode: acceptEdits`; rejecting that valid
+suggestion would silently drop the entire grant. No update is inferred or added
+by ACPCore. A malformed bundle, explicit ask rule, suppression flag or question
+does not produce a remembered-approval option. Live and recovered
 cards share this request-specific capability; raw policy updates stay private.
 
 Scope limit: an initial `printf` command with shell redirection still prompted

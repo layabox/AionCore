@@ -5,9 +5,13 @@
 use serde_json::Value;
 
 fn safe_text(value: &Value, limit: usize) -> bool {
-    value
-        .as_str()
-        .is_some_and(|text| !text.trim().is_empty() && text.len() <= limit && !text.chars().any(|ch| ch.is_control()))
+    value.as_str().is_some_and(|text| {
+        !text.trim().is_empty()
+            && text.len() <= limit
+            && !text
+                .chars()
+                .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
+    })
 }
 
 fn valid_update(update: &Value) -> bool {
@@ -18,11 +22,16 @@ fn valid_update(update: &Value) -> bool {
         return false;
     }
     match update.get("type").and_then(Value::as_str) {
-        // Remember this native grant; never turn an ordinary approval into a
-        // permission-mode change or replacement/removal of existing policy.
-        Some("addRules") if update.get("behavior").and_then(Value::as_str) == Some("allow") => {
+        // The SDK requires the complete native suggestion bundle, including
+        // proposed directory/mode changes. Do not synthesize or rewrite one.
+        Some(kind @ ("addRules" | "replaceRules" | "removeRules"))
+            if matches!(
+                update.get("behavior").and_then(Value::as_str),
+                Some("allow" | "deny" | "ask")
+            ) =>
+        {
             update.get("rules").and_then(Value::as_array).is_some_and(|rules| {
-                !rules.is_empty()
+                (kind == "replaceRules" || !rules.is_empty())
                     && rules.len() <= 100
                     && rules.iter().all(|rule| {
                         rule.get("toolName").is_some_and(|value| safe_text(value, 512))
@@ -30,17 +39,21 @@ fn valid_update(update: &Value) -> bool {
                     })
             })
         }
-        Some("addDirectories") => update
+        Some("addDirectories" | "removeDirectories") => update
             .get("directories")
             .and_then(Value::as_array)
             .is_some_and(|paths| {
                 !paths.is_empty() && paths.len() <= 100 && paths.iter().all(|value| safe_text(value, 4096))
             }),
+        Some("setMode") => matches!(
+            update.get("mode").and_then(Value::as_str),
+            Some("default" | "acceptEdits" | "bypassPermissions" | "plan" | "dontAsk" | "auto")
+        ),
         _ => false,
     }
 }
 
-/// Snapshot only native additive allow suggestions, keeping their exact scope.
+/// Snapshot the complete validated native bundle, keeping its exact scope.
 /// A malformed bundle is rejected as a whole; never infer rules from tool input.
 pub(super) fn remembered_permission_updates(request: &Value) -> Option<Value> {
     // Verified raw field: @anthropic-ai/claude-agent-sdk 0.3.267 sdk.mjs.
@@ -96,7 +109,23 @@ mod tests {
     }
 
     #[test]
-    fn claude_remembered_approval_rejects_invalid_or_broader_bundles() {
+    fn claude_remembered_approval_preserves_complete_official_update_variants() {
+        let updates = json!([
+            {"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"touch *"}],"behavior":"allow","destination":"localSettings"},
+            {"type":"replaceRules","rules":[],"behavior":"ask","destination":"session"},
+            {"type":"removeRules","rules":[{"toolName":"Bash"}],"behavior":"deny","destination":"session"},
+            {"type":"addDirectories","directories":["/tmp/probe"],"destination":"session"},
+            {"type":"removeDirectories","directories":["/tmp/old"],"destination":"session"},
+            {"type":"setMode","mode":"acceptEdits","destination":"session"}
+        ]);
+        assert_eq!(
+            remembered_permission_updates(&json!({"tool_name":"Bash","permission_suggestions":updates})),
+            Some(updates)
+        );
+    }
+
+    #[test]
+    fn claude_remembered_approval_rejects_invalid_bundles() {
         let valid = json!({"type":"addRules","rules":[{"toolName":"Bash"}],"behavior":"allow","destination":"session"});
         let mut invalid = valid.clone();
         invalid["rules"][0]["toolName"] = json!("");
@@ -104,8 +133,8 @@ mod tests {
             json!([]),
             json!({}),
             json!([invalid]),
-            json!([valid.clone(), {"type":"setMode","mode":"bypassPermissions","destination":"session"}]),
-            json!([{"type":"addRules","rules":[{"toolName":"Bash"}],"behavior":"deny","destination":"session"}]),
+            json!([valid.clone(), {"type":"setMode","mode":"unknown-mode","destination":"session"}]),
+            json!([{"type":"addRules","rules":[{"toolName":"Bash"}],"behavior":"unknown","destination":"session"}]),
             json!([{"type":"addDirectories","directories":["bad\u{0}path"],"destination":"session"}]),
             json!([{"type":"addRules","rules":[{"toolName":"Bash"}],"behavior":"allow","destination":"unknown"}]),
             Value::Array(vec![valid.clone(); 101]),
