@@ -9791,7 +9791,7 @@ mod pump_tests {
             let live = translate_event(
                 SessionEvent::Permission {
                     request_id: "claude-options".into(),
-                    kind: PermissionKind::Tool,
+                    kind: aionui_session::PermissionKind::Tool,
                     metadata: Some(serde_json::json!({"allow_always":enabled})),
                     tool_name: Some("Bash".into()),
                     input: None,
