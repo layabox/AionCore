@@ -235,14 +235,15 @@ pub enum SessionEvent {
         kind: PermissionKind,
         /// G3: backend-parsed, NON-authoritative context the conversation layer
         /// uses to DECIDE auto-approval (e.g. team-MCP allowlist) WITHOUT the
-        /// backend deciding anything. Shape (when present, ACP only):
+        /// backend deciding anything. Shape (when present, ACP):
         /// `{ "server_name": "aionui-team"?, "options": [{"option_id","kind"}] }`.
         /// The backend only PARSES the `session/request_permission` params into
         /// this; the conversation facade consults an injected `PermissionAuthorizer`
         /// and, if it auto-approves, dispatches `AnswerPermission` instead of
         /// surfacing a card. The reducer NEVER reads it (ref-counts on request_id
-        /// only — §R9). `None` for backends/paths that carry no MCP context
-        /// (claude direct-CLI raises permission only for AskUserQuestion).
+        /// only — §R9). Native adapters may also carry an `allow_always` boolean
+        /// to describe remembered-approval availability without exposing policy rules.
+        /// `None` for backends/paths that carry no additional permission context.
         /// `#[serde(default)]` so older persisted frames deserialize as `None`.
         /// ⚠️ TIO-13: may carry a tool title — never log at info level.
         #[serde(default)]

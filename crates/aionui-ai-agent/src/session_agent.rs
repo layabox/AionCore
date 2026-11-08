@@ -736,7 +736,7 @@ impl SessionAgentTask {
                     Vec::new()
                 };
                 let options = if options.is_empty() {
-                    default_permission_options()
+                    default_permission_options_for(p.allow_always)
                 } else {
                     options
                 };
@@ -3975,6 +3975,14 @@ fn default_permission_options() -> Vec<crate::protocol::events::AcpPermissionOpt
     ]
 }
 
+fn default_permission_options_for(allow_always: Option<bool>) -> Vec<crate::protocol::events::AcpPermissionOptionData> {
+    let mut options = default_permission_options();
+    if allow_always == Some(false) {
+        options.retain(|option| option.option_id != PERM_ALLOW_ALWAYS);
+    }
+    options
+}
+
 /// Project an AskUserQuestion tool `input` into permission-card options the user can
 /// pick. `input` shape (claude, live-captured): `{questions:[{question, header,
 /// options:[{label, description}], multiSelect}]}`. The frontend card is single-select
@@ -4591,6 +4599,7 @@ fn translate_event(event: SessionEvent, conversation_id: &str, terminal_result_s
             request_id,
             tool_name,
             input,
+            metadata,
             ..
         } => {
             // The frontend permission card renders whatever `options[]` we send as the
@@ -4610,7 +4619,12 @@ fn translate_event(event: SessionEvent, conversation_id: &str, terminal_result_s
                 Vec::new()
             };
             let options = if options.is_empty() {
-                default_permission_options()
+                default_permission_options_for(
+                    metadata
+                        .as_ref()
+                        .and_then(|value| value.get("allow_always"))
+                        .and_then(serde_json::Value::as_bool),
+                )
             } else {
                 options
             };
@@ -9685,6 +9699,7 @@ mod pump_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_confirmations_recovers_pending_ask_user_question() {
         let backend: Arc<dyn SessionBackend> = Arc::new(PendingPermBackend(aionui_session::PendingPermissionView {
+            allow_always: None,
             mcp_server_name: None,
             request_id: "req-recover".into(),
             tool_name: "AskUserQuestion".into(),
@@ -9724,6 +9739,7 @@ mod pump_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_confirmations_recovers_mcp_identity_without_tool_input() {
         let backend: Arc<dyn SessionBackend> = Arc::new(PendingPermBackend(aionui_session::PendingPermissionView {
+            allow_always: None,
             mcp_server_name: Some("identity_probe".into()),
             request_id: "elicit:0".into(),
             tool_name: "Elicitation".into(),
@@ -9748,8 +9764,61 @@ mod pump_tests {
 
     // A pending ordinary tool permission recovers as the generic allow/deny card.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn claude_remembered_approval_options_match_live_and_recovery_capability() {
+        for enabled in [false, true] {
+            let backend: Arc<dyn SessionBackend> =
+                Arc::new(PendingPermBackend(aionui_session::PendingPermissionView {
+                    allow_always: Some(enabled),
+                    mcp_server_name: None,
+                    request_id: "claude-options".into(),
+                    tool_name: "Bash".into(),
+                    questions: None,
+                }));
+            let task = SessionAgentTask::new(
+                AgentType::Acp,
+                "conv-1".into(),
+                "user-1".into(),
+                "/w".into(),
+                backend,
+                None,
+            );
+            let recovered = task.get_confirmations();
+            let recovered_ids = recovered[0]
+                .options
+                .iter()
+                .map(|option| option.value.as_str().unwrap())
+                .collect::<Vec<_>>();
+            let live = translate_event(
+                SessionEvent::Permission {
+                    request_id: "claude-options".into(),
+                    kind: PermissionKind::Tool,
+                    metadata: Some(serde_json::json!({"allow_always":enabled})),
+                    tool_name: Some("Bash".into()),
+                    input: None,
+                },
+                "conv-1",
+                false,
+            );
+            let AgentStreamEvent::AcpPermission(crate::protocol::events::AcpPermissionEventData::Request(request)) =
+                &live[0]
+            else {
+                panic!("permission missing")
+            };
+            let live_ids = request
+                .options
+                .iter()
+                .map(|option| option.option_id.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(recovered_ids, live_ids);
+            assert_eq!(live_ids.contains(&"allow_always"), enabled);
+            assert!(live_ids.contains(&"allow") && live_ids.contains(&"reject"));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_confirmations_recovers_generic_permission() {
         let backend: Arc<dyn SessionBackend> = Arc::new(PendingPermBackend(aionui_session::PendingPermissionView {
+            allow_always: None,
             mcp_server_name: None,
             request_id: "req-tool".into(),
             tool_name: "Bash".into(),

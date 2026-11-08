@@ -178,6 +178,9 @@ pub struct QuestionAnswer {
 /// tool `input` (command body / args) is deliberately NOT exposed (TIO-13).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingPermissionView {
+    /// Native adapter's remembered-approval capability for this request.
+    /// None preserves backends whose options are supplied through another path.
+    pub allow_always: Option<bool>,
     /// Server identity only for ordinary MCP tool approvals, never interactive elicitations.
     pub mcp_server_name: Option<String>,
     /// The control correlation key (claude `request_id`); the recovery card's

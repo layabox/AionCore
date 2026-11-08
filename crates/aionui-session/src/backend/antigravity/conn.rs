@@ -1039,6 +1039,7 @@ impl SessionBackend for AntigravitySessionBackend {
         pending
             .iter()
             .map(|(request_id, entry)| PendingPermissionView {
+                allow_always: None,
                 mcp_server_name: None,
                 request_id: request_id.clone(),
                 tool_name: entry.tool_name.clone(),

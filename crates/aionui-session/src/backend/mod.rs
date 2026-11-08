@@ -11,6 +11,7 @@
 mod acp_conn;
 mod antigravity;
 mod claude_conn;
+mod claude_permissions;
 mod cli_version;
 mod codex_conn;
 mod codex_goal;

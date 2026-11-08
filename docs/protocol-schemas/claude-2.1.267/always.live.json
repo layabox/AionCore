@@ -1,0 +1,97 @@
+{
+  "verdict": {
+    "cli": "2.1.267",
+    "always": true,
+    "toolCalls": 2,
+    "approvalRequests": 1,
+    "completed": true,
+    "isError": false,
+    "fileWritten": true
+  },
+  "frames": [
+    {
+      "request": {
+        "type": "control_request",
+        "request_id": "8cc58abb-a88e-409c-9abc-4168c33cd3f9",
+        "request": {
+          "subtype": "can_use_tool",
+          "tool_name": "Bash",
+          "display_name": "Bash",
+          "input": {
+            "command": "touch permission-probe.txt",
+            "description": "Create empty probe file"
+          },
+          "description": "Create empty probe file",
+          "permission_suggestions": [
+            {
+              "type": "addRules",
+              "rules": [
+                {
+                  "toolName": "Bash",
+                  "ruleContent": "touch permission-probe.txt"
+                }
+              ],
+              "behavior": "allow",
+              "destination": "localSettings"
+            },
+            {
+              "type": "addDirectories",
+              "directories": [
+                "/tmp/claude-permission-probe"
+              ],
+              "destination": "session"
+            },
+            {
+              "type": "setMode",
+              "mode": "acceptEdits",
+              "destination": "session"
+            }
+          ],
+          "blocked_path": "/tmp/claude-permission-probe/permission-probe.txt",
+          "tool_use_id": "call_00_eytApHVytnfolqnNsgbI2593"
+        }
+      },
+      "response": {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "8cc58abb-a88e-409c-9abc-4168c33cd3f9",
+          "response": {
+            "behavior": "allow",
+            "updatedInput": {
+              "command": "touch permission-probe.txt",
+              "description": "Create empty probe file"
+            },
+            "toolUseID": "call_00_eytApHVytnfolqnNsgbI2593",
+            "updatedPermissions": [
+              {
+                "type": "addRules",
+                "rules": [
+                  {
+                    "toolName": "Bash",
+                    "ruleContent": "touch permission-probe.txt"
+                  }
+                ],
+                "behavior": "allow",
+                "destination": "localSettings"
+              },
+              {
+                "type": "addDirectories",
+                "directories": [
+                  "/tmp/claude-permission-probe"
+                ],
+                "destination": "session"
+              },
+              {
+                "type": "setMode",
+                "mode": "acceptEdits",
+                "destination": "session"
+              }
+            ],
+            "decisionClassification": "user_permanent"
+          }
+        }
+      }
+    }
+  ]
+}

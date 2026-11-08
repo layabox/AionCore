@@ -1,0 +1,129 @@
+{
+  "verdict": {
+    "cli": "2.1.267",
+    "always": false,
+    "toolCalls": 2,
+    "approvalRequests": 2,
+    "completed": true,
+    "isError": false,
+    "fileWritten": true
+  },
+  "frames": [
+    {
+      "request": {
+        "type": "control_request",
+        "request_id": "eae15ff8-1c10-43ab-a565-80b3e7ee7757",
+        "request": {
+          "subtype": "can_use_tool",
+          "tool_name": "Bash",
+          "display_name": "Bash",
+          "input": {
+            "command": "touch permission-probe.txt",
+            "description": "Create an empty probe file"
+          },
+          "description": "Create an empty probe file",
+          "permission_suggestions": [
+            {
+              "type": "addRules",
+              "rules": [
+                {
+                  "toolName": "Bash",
+                  "ruleContent": "touch permission-probe.txt"
+                }
+              ],
+              "behavior": "allow",
+              "destination": "localSettings"
+            },
+            {
+              "type": "addDirectories",
+              "directories": [
+                "/tmp/claude-permission-probe"
+              ],
+              "destination": "session"
+            },
+            {
+              "type": "setMode",
+              "mode": "acceptEdits",
+              "destination": "session"
+            }
+          ],
+          "blocked_path": "/tmp/claude-permission-probe/permission-probe.txt",
+          "tool_use_id": "call_00_NtRlQjTe3zGKW6o0XRaS6582"
+        }
+      },
+      "response": {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "eae15ff8-1c10-43ab-a565-80b3e7ee7757",
+          "response": {
+            "behavior": "allow",
+            "updatedInput": {
+              "command": "touch permission-probe.txt",
+              "description": "Create an empty probe file"
+            },
+            "toolUseID": "call_00_NtRlQjTe3zGKW6o0XRaS6582"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "type": "control_request",
+        "request_id": "dd58f8e3-fb5c-4b53-8f49-875b50a34b87",
+        "request": {
+          "subtype": "can_use_tool",
+          "tool_name": "Bash",
+          "display_name": "Bash",
+          "input": {
+            "command": "touch permission-probe.txt",
+            "description": "Create an empty probe file"
+          },
+          "description": "Create an empty probe file",
+          "permission_suggestions": [
+            {
+              "type": "addRules",
+              "rules": [
+                {
+                  "toolName": "Bash",
+                  "ruleContent": "touch permission-probe.txt"
+                }
+              ],
+              "behavior": "allow",
+              "destination": "localSettings"
+            },
+            {
+              "type": "addDirectories",
+              "directories": [
+                "/tmp/claude-permission-probe"
+              ],
+              "destination": "session"
+            },
+            {
+              "type": "setMode",
+              "mode": "acceptEdits",
+              "destination": "session"
+            }
+          ],
+          "blocked_path": "/tmp/claude-permission-probe/permission-probe.txt",
+          "tool_use_id": "call_00_ET_BsngN2Vj8LcTL6bk9yCk8071"
+        }
+      },
+      "response": {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "dd58f8e3-fb5c-4b53-8f49-875b50a34b87",
+          "response": {
+            "behavior": "allow",
+            "updatedInput": {
+              "command": "touch permission-probe.txt",
+              "description": "Create an empty probe file"
+            },
+            "toolUseID": "call_00_ET_BsngN2Vj8LcTL6bk9yCk8071"
+          }
+        }
+      }
+    }
+  ]
+}

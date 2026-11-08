@@ -18,6 +18,7 @@ use std::sync::Arc;
 use aionui_process::Spawner;
 use tokio::sync::{Mutex, broadcast};
 
+use super::claude_permissions::remembered_permission_updates;
 use super::suspend::{ProcHandle, SuspendController, spawn_idle_timer};
 use super::types::{
     Admission, BackendError, CancelTarget, Command, CommandReceipt, PendingPermissionView, SessionEnvelope, SessionSpec,
@@ -710,6 +711,8 @@ impl TitleGenState {
 /// build the keyed `control_response` (claude blocks the tool until it arrives).
 #[derive(Clone)]
 struct PendingPerm {
+    /// Validated native suggestions, private until the user selects Allow Always.
+    permission_updates: Option<serde_json::Value>,
     /// The assistant tool_use block id — echoed back as `toolUseID` (required).
     tool_use_id: String,
     /// Tool name; `AskUserQuestion` (the only interactive tool on claude headless)
@@ -1507,7 +1510,7 @@ fn build_control_response(
     use super::types::PermissionDecision;
     use serde_json::json;
     let allow = matches!(decision, PermissionDecision::Approved | PermissionDecision::AllowAlways);
-    let result = if !allow {
+    let mut result = if !allow {
         json!({ "behavior": "deny", "message": "User rejected the request.", "toolUseID": pending.tool_use_id })
     } else if pending.tool_name == "AskUserQuestion" {
         let answers_map = build_ask_user_question_answers(&pending.input, selected, answers);
@@ -1533,6 +1536,19 @@ fn build_control_response(
         };
         json!({ "behavior": "allow", "updatedInput": updated_input, "toolUseID": pending.tool_use_id })
     };
+    if pending.tool_name != "AskUserQuestion" {
+        result["decisionClassification"] = json!(match decision {
+            PermissionDecision::Denied => "user_reject",
+            PermissionDecision::AllowAlways if pending.permission_updates.is_some() => "user_permanent",
+            _ => "user_temporary",
+        });
+    }
+    if decision == PermissionDecision::AllowAlways
+        && pending.tool_name != "AskUserQuestion"
+        && let Some(updates) = &pending.permission_updates
+    {
+        result["updatedPermissions"] = updates.clone();
+    }
     json!({
         "type": "control_response",
         "response": { "subtype": "success", "request_id": request_id, "response": result }
@@ -1850,6 +1866,13 @@ async fn reader_task(
                 sniff_replay_prompt_ack(v, &event_tx, &session_id, cur_gen);
             }
             for mut ev in events {
+                if let SessionEvent::Permission {
+                    request_id, metadata, ..
+                } = &mut ev
+                    && let Some(pending) = pending_perms.lock().unwrap_or_else(|e| e.into_inner()).get(request_id)
+                {
+                    *metadata = Some(serde_json::json!({ "allow_always": pending.permission_updates.is_some() }));
+                }
                 // Cost ledger: claude's `total_cost_usd` is PROCESS-cumulative, so a
                 // costed report is rewritten to the SESSION-cumulative `base + raw`
                 // (see CostLedger). `last_raw` is recorded on EVERY costed frame —
@@ -2199,6 +2222,7 @@ fn register_or_clear_pending(
             pending.lock().unwrap_or_else(|e| e.into_inner()).insert(
                 request_id.to_string(),
                 PendingPerm {
+                    permission_updates: remembered_permission_updates(request),
                     tool_use_id: tool_use_id.to_string(),
                     tool_name,
                     input: request.get("input").cloned().unwrap_or(Value::Null),
@@ -3700,6 +3724,7 @@ impl SessionBackend for ClaudeSessionBackend {
                     None
                 };
                 PendingPermissionView {
+                    allow_always: Some(perm.permission_updates.is_some()),
                     mcp_server_name: None,
                     request_id: request_id.clone(),
                     tool_name: perm.tool_name.clone(),
@@ -5134,6 +5159,109 @@ mod tests {
     /// can_use_tool control_request (so the reader registers it), answers it, and
     /// asserts both effects.
     #[tokio::test]
+    async fn claude_remembered_approval_roundtrip_keeps_native_rules_and_once_separate() {
+        for decision in [
+            crate::PermissionDecision::Approved,
+            crate::PermissionDecision::AllowAlways,
+            crate::PermissionDecision::Denied,
+        ] {
+            let updates = serde_json::json!([{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"printf:*"}],"behavior":"allow","destination":"localSettings"}]);
+            let frame = serde_json::json!({"type":"control_request","request_id":"claude-rule","request":{
+                "subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"tool-rule","input":{"command":"printf probe"},"permission_suggestions":updates
+            }});
+            let fake = FakeAgentIo::never_exits(Vec::new()).with_gated_tail(format!("{frame}\n").into_bytes());
+            let release = fake.stdout_releaser();
+            let captured = fake.captured_stdin();
+            let backend = ClaudeSessionBackend::build_with_io("claude-rule", Box::new(fake)).await;
+            let mut events = backend.events();
+            release();
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while let Some(env) = events.next().await {
+                    if let SessionEvent::Permission { metadata, .. } = env.event {
+                        assert_eq!(metadata.unwrap()["allow_always"], true);
+                        return;
+                    }
+                }
+                panic!("permission missing");
+            })
+            .await
+            .unwrap();
+            assert_eq!(backend.pending_permission_requests()[0].allow_always, Some(true));
+            backend
+                .dispatch(Command::AnswerPermission {
+                    request_id: "claude-rule".into(),
+                    decision: decision.clone(),
+                    selected: None,
+                    answers: vec![],
+                })
+                .await
+                .unwrap();
+            let written = String::from_utf8(captured.lock().await.clone()).unwrap();
+            let response = written
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find(|frame| frame["type"] == "control_response")
+                .unwrap();
+            let body = &response["response"]["response"];
+            assert_eq!(body["toolUseID"], "tool-rule");
+            assert_eq!(
+                body["behavior"],
+                if decision == crate::PermissionDecision::Denied {
+                    "deny"
+                } else {
+                    "allow"
+                }
+            );
+            if decision == crate::PermissionDecision::AllowAlways {
+                assert_eq!(body["updatedPermissions"], updates);
+            } else {
+                assert!(body.get("updatedPermissions").is_none());
+            }
+            assert!(backend.pending_permission_requests().is_empty());
+        }
+    }
+
+    #[test]
+    fn claude_remembered_approval_replays_native_capture() {
+        let capture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../docs/protocol-schemas/claude-2.1.267/always.live.json"
+        ))
+        .unwrap();
+        let pair = &capture["frames"][0];
+        let frame = &pair["request"];
+        let request_id = frame["request_id"].as_str().unwrap();
+        let pending = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        register_or_clear_pending(frame, &pending);
+        let entry = pending.lock().unwrap().get(request_id).unwrap().clone();
+        let response = build_control_response(request_id, &entry, crate::PermissionDecision::AllowAlways, None, &[]);
+        assert_eq!(response, pair["response"]);
+        let once = build_control_response(request_id, &entry, crate::PermissionDecision::Approved, None, &[]);
+        assert!(once["response"]["response"].get("updatedPermissions").is_none());
+        assert_eq!(once["response"]["response"]["decisionClassification"], "user_temporary");
+    }
+
+    #[test]
+    fn claude_remembered_approval_capability_does_not_leak_between_requests() {
+        let pending = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        for (id, suggestions) in [
+            (
+                "one",
+                serde_json::json!([{"type":"addRules","rules":[{"toolName":"Bash"}],"behavior":"allow","destination":"session"}]),
+            ),
+            ("two", serde_json::Value::Null),
+        ] {
+            register_or_clear_pending(
+                &serde_json::json!({"type":"control_request","request_id":id,"request":{
+                "subtype":"can_use_tool","tool_name":"Bash","tool_use_id":id,"input":{},"permission_suggestions":suggestions}}),
+                &pending,
+            );
+        }
+        let entries = pending.lock().unwrap();
+        assert!(entries["one"].permission_updates.is_some());
+        assert!(entries["two"].permission_updates.is_none());
+    }
+
+    #[tokio::test]
     async fn answer_permission_writes_control_response_and_resolves() {
         let fixture = concat!(
             r#"{"type":"control_request","request_id":"req-7","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"toolu-7","input":{"command":"ls"}}}"#,
@@ -6183,6 +6311,7 @@ mod tests {
     fn build_control_response_uses_selected_label_over_first_option() {
         use super::super::types::PermissionDecision;
         let pending = PendingPerm {
+            permission_updates: None,
             tool_use_id: "toolu-1".into(),
             tool_name: "AskUserQuestion".into(),
             input: serde_json::json!({
@@ -6228,6 +6357,7 @@ mod tests {
         // Two questions: a single-select + a multiSelect — the exact shape claude
         // emits (see the array fixture's control_request input).
         let pending = PendingPerm {
+            permission_updates: None,
             tool_use_id: "toolu-9".into(),
             tool_name: "AskUserQuestion".into(),
             input: serde_json::json!({
@@ -6289,6 +6419,7 @@ mod tests {
     fn build_control_response_plain_tool_allow_carries_updated_input() {
         use super::super::types::PermissionDecision;
         let pending = PendingPerm {
+            permission_updates: None,
             tool_use_id: "toolu-bash".into(),
             tool_name: "Bash".into(),
             input: serde_json::json!({ "command": "ls" }),
@@ -6315,6 +6446,7 @@ mod tests {
     fn build_control_response_plain_tool_allow_non_object_input_falls_back_to_empty_record() {
         use super::super::types::PermissionDecision;
         let pending = PendingPerm {
+            permission_updates: None,
             tool_use_id: "toolu-x".into(),
             tool_name: "Weird".into(),
             input: serde_json::json!("not-an-object"),

@@ -5293,12 +5293,14 @@ impl SessionBackend for CodexSessionBackend {
                 PendingCodexRequest::Approval {
                     title, mcp_server_name, ..
                 } => Some(PendingPermissionView {
+                    allow_always: None,
                     mcp_server_name: mcp_server_name.clone(),
                     request_id: request_id.clone(),
                     tool_name: title.clone(),
                     questions: None,
                 }),
                 PendingCodexRequest::Question(request) => Some(PendingPermissionView {
+                    allow_always: None,
                     mcp_server_name: None,
                     request_id: request_id.clone(),
                     tool_name: "AskUserQuestion".into(),
