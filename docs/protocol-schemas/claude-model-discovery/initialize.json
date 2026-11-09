@@ -1,0 +1,107 @@
+{
+  "type": "control_response",
+  "response": {
+    "subtype": "success",
+    "request_id": "catalog-capture",
+    "response": {
+      "models": [
+        {
+          "value": "default",
+          "resolvedModel": "deepseek-flash[1m]",
+          "displayName": "Default (recommended)",
+          "description": "Use the default model (currently deepseek-flash[1m])",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "opus",
+          "resolvedModel": "deepseek-flash[1M]",
+          "displayName": "deepseek-flash",
+          "description": "Custom Opus model (1M context)",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "fable",
+          "resolvedModel": "deepseek-flash[1M]",
+          "displayName": "deepseek-flash",
+          "description": "Custom Fable model",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "sonnet",
+          "resolvedModel": "deepseek-flash[1M]",
+          "displayName": "deepseek-flash",
+          "description": "Custom Sonnet model (1M context)",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "haiku",
+          "resolvedModel": "deepseek-flash",
+          "displayName": "deepseek-flash",
+          "description": "Custom Haiku model",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "deepseek-flash[1M]",
+          "resolvedModel": "deepseek-flash[1m]",
+          "displayName": "deepseek-flash[1M]",
+          "description": "Custom model",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        }
+      ]
+    }
+  }
+}

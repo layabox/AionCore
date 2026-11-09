@@ -56,7 +56,20 @@ fn agent_service(
     provider_repo: Arc<dyn IProviderRepository>,
     data_dir: std::path::PathBuf,
 ) -> Arc<AgentService> {
-    AgentService::new(registry, Arc::new(NoopBroadcaster), provider_repo, [0; 32], data_dir)
+    let spawner = Arc::new(aionui_process::RealSpawner::new(
+        Arc::new(aionui_process::FileRegistryStore::new(&data_dir)),
+        uuid::Uuid::new_v4(),
+        "catalog-test",
+    ));
+    AgentService::new(
+        registry,
+        Arc::new(NoopBroadcaster),
+        provider_repo,
+        [0; 32],
+        data_dir.clone(),
+        spawner,
+        data_dir,
+    )
 }
 
 #[tokio::test]

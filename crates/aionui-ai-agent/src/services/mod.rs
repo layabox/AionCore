@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod availability;
+mod catalog;
 pub mod custom;
 pub mod provider_health;
 pub mod remote;

@@ -2520,7 +2520,9 @@ pub fn spawn_catalog_writeback(
 /// `config_options[]` wire shape AND the top-level `available_modes`/`available_models`
 /// columns directly (the shape-stable path that keeps the codex model picker from
 /// going empty).
-fn catalog_partial_from_caps(caps: &aionui_session::Capabilities) -> Option<aionui_api_types::AgentHandshake> {
+pub(crate) fn catalog_partial_from_caps(
+    caps: &aionui_session::Capabilities,
+) -> Option<aionui_api_types::AgentHandshake> {
     let mut config_options = Vec::new();
     if !caps.available_modes.is_empty() {
         config_options.push(serde_json::json!({

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [codex/startup-recovery-index, codex/permission-approval, codex/agent-test-diagnostics, codex/mcp-permission-identity, main, codex/agent-launch-arguments, codex/agent-launch-arguments-verification]
+    branches: [codex/claude-model-catalog, codex/startup-recovery-index, codex/permission-approval, codex/agent-test-diagnostics, codex/mcp-permission-identity, main, codex/agent-launch-arguments, codex/agent-launch-arguments-verification]
   pull_request:
     branches: [main]
 

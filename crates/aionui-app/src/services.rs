@@ -63,6 +63,7 @@ pub struct AppServices {
     /// mock `worker_task_manager` that does not implement the trait.
     pub task_manager_delete_hook: Option<Arc<dyn OnConversationDelete>>,
     pub agent_registry: Arc<AgentRegistry>,
+    pub session_spawner: Arc<dyn aionui_process::Spawner>,
     pub conversation_repo: Arc<dyn IConversationRepository>,
     pub acp_session_sync: Arc<AcpSessionSyncService>,
     /// Raw storage-encryption secret string, used to derive the AES-256-GCM
@@ -369,7 +370,7 @@ impl AppServices {
             broadcaster: event_bus.clone(),
             backend_binary_path: backend_binary_path.clone(),
             mcp_server_repo: Some(mcp_server_repo),
-            session_spawner,
+            session_spawner: session_spawner.clone(),
             // agy cannot prompt for tool permission in headless mode, so AionUi
             // registers itself as its PreToolUse hook; the hook process calls
             // back here to raise the user's permission card.
@@ -445,6 +446,7 @@ impl AppServices {
             user_order_store,
             task_manager_delete_hook: Some(task_manager_delete_hook),
             agent_registry,
+            session_spawner,
             conversation_repo,
             acp_session_sync: acp_agent_service,
             encryption_secret_raw: encryption_secret,

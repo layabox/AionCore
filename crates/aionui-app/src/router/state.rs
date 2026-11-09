@@ -287,6 +287,8 @@ pub async fn build_module_states(
         provider_repo,
         encryption_key,
         services.data_dir.clone(),
+        services.session_spawner.clone(),
+        services.work_dir.clone(),
     );
     services
         .conversation_service

@@ -26,7 +26,7 @@ use aionui_db::{AgentMetadataRow, IAgentMetadataRepository, UpdateAgentHandshake
 use aionui_runtime::{RuntimeCommandProbe, probe_node_runtime_supported, probe_runtime_command, resolve_command_path};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::error::AgentError;
@@ -81,6 +81,7 @@ pub(crate) struct CatalogSyncMessage {
     pub(crate) user_id: String,
     pub(crate) agent_metadata_id: String,
     pub(crate) handshake: AgentHandshake,
+    completion: Option<oneshot::Sender<Result<(), AgentError>>>,
 }
 
 /// A `CatalogSender` wired to a plain receiver, so catalog-publishing logic can
@@ -141,16 +142,19 @@ impl AgentRegistry {
     fn spawn_catalog_consumer(self: Arc<Self>, mut rx: mpsc::Receiver<CatalogSyncMessage>) {
         tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
-                if let Err(err) = self
+                let result = self
                     .apply_handshake_inner(&msg.user_id, &msg.agent_metadata_id, &msg.handshake)
-                    .await
-                {
+                    .await;
+                if let Err(err) = &result {
                     warn!(
                         user_id = %msg.user_id,
                         agent_metadata_id = %msg.agent_metadata_id,
                         error = %err,
                         "Catalog sync: apply_handshake failed"
                     );
+                }
+                if let Some(completion) = msg.completion {
+                    let _ = completion.send(result);
                 }
             }
             debug!("Catalog sync consumer task exiting — all senders dropped");
@@ -1493,6 +1497,28 @@ pub struct CatalogSender {
 }
 
 impl CatalogSender {
+    /// Explicit discovery waits for the same serialized writer used by live sessions.
+    pub(crate) async fn send_partial_and_wait(
+        &self,
+        user_id: String,
+        agent_metadata_id: String,
+        handshake: AgentHandshake,
+    ) -> Result<(), AgentError> {
+        let (completion, received) = oneshot::channel();
+        self.tx
+            .send(CatalogSyncMessage {
+                user_id,
+                agent_metadata_id,
+                handshake,
+                completion: Some(completion),
+            })
+            .await
+            .map_err(|_| AgentError::internal("Catalog writer is unavailable"))?;
+        received
+            .await
+            .map_err(|_| AgentError::internal("Catalog writer stopped before confirming discovery"))?
+    }
+
     /// Submit a partial handshake update. Returns without error when the
     /// channel is closed (only happens at shutdown) or full — callers do
     /// not need to care because the consumer is best-effort.
@@ -1501,6 +1527,7 @@ impl CatalogSender {
             user_id,
             agent_metadata_id,
             handshake,
+            completion: None,
         };
         if let Err(err) = self.tx.try_send(msg) {
             use mpsc::error::TrySendError;

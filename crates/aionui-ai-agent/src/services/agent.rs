@@ -29,6 +29,7 @@ pub struct AgentService {
     broadcaster: Arc<dyn EventBroadcaster>,
     provider_health: ProviderHealthCheckService,
     availability: AgentAvailabilityService,
+    catalog_refresh: Arc<super::catalog::AgentCatalogRefresh>,
 }
 
 impl AgentService {
@@ -38,10 +39,18 @@ impl AgentService {
         provider_repo: Arc<dyn IProviderRepository>,
         encryption_key: [u8; 32],
         data_dir: PathBuf,
+        spawner: Arc<dyn aionui_process::Spawner>,
+        work_dir: PathBuf,
     ) -> Arc<Self> {
         let provider_health = ProviderHealthCheckService::new(provider_repo.clone(), encryption_key, data_dir.clone());
         let availability = AgentAvailabilityService::new(registry.clone(), provider_repo);
+        let catalog_refresh = super::catalog::AgentCatalogRefresh::new(
+            registry.clone(),
+            Arc::new(aionui_session::ClaudeConnection::new(spawner)),
+            work_dir,
+        );
         Arc::new(Self {
+            catalog_refresh,
             registry,
             broadcaster,
             provider_health,
@@ -100,6 +109,10 @@ impl AgentService {
             }
         }
         Ok(entries)
+    }
+
+    pub async fn refresh_agent_catalog(&self, user_id: &str, id: &str) -> Result<AgentManagementRow, AgentError> {
+        self.catalog_refresh.refresh(user_id, id).await
     }
 
     pub async fn health_check_agent_by_id(&self, user_id: &str, id: &str) -> Result<AgentManagementRow, AgentError> {
