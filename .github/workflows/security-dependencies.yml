@@ -1,0 +1,35 @@
+name: Security dependency resolution
+on:
+  push:
+    branches: [codex/security-dependencies]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.95.0'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: security-resolution
+      - run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Resolve patched dependency graph
+        run: |
+          cargo update --verbose
+          cargo metadata --format-version 1 --locked > dependency-metadata.json
+      - name: Audit complete resolved lockfile including warnings
+        run: cargo audit --locked --deny warnings --json > dependency-audit.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dependency-resolution-${{ github.sha }}
+          path: |
+            Cargo.lock
+            dependency-metadata.json
+            dependency-audit.json
+          if-no-files-found: error
+          retention-days: 7

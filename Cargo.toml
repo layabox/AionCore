@@ -73,7 +73,7 @@ aion-config = { git = "https://github.com/iOfficeAI/aionrs.git", tag = "v0.2.11"
 aion-mcp = { git = "https://github.com/iOfficeAI/aionrs.git", tag = "v0.2.11" }
 
 # Core framework
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.54.1", features = ["full"] }
 axum = { version = "0.8", features = ["multipart", "ws"] }
 tower = { version = "0.5" }
 tower-http = { version = "0.6", features = ["cors", "trace", "limit", "fs"] }
@@ -82,7 +82,7 @@ http = "1"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+serde-saphyr = { version = "2.1.1", default-features = false, features = ["deserialize"] }
 
 # Async utilities
 futures-util = "0.3"
@@ -92,7 +92,7 @@ async-trait = "0.1"
 
 # Error handling
 thiserror = "2"
-anyhow = "1"
+anyhow = "1.0.103"
 
 # Logging
 tracing = "0.1"
@@ -144,7 +144,7 @@ include_dir = "0.7"
 notify = "8"
 walkdir = "2"
 ignore = "0.4"
-zip = "2"
+zip = "9.5"
 git2 = { version = "0.21.0", default-features = false }
 # Source-control discard sends untracked files to the platform trash instead of
 # unlinking them (mac/win/linux, x64 + arm64).
@@ -154,7 +154,7 @@ rust-embed = "8"
 
 # Runtime embedding
 fs2 = "0.4"
-zstd = "0.13"
+zstd = "0.14.3"
 
 # Cron
 cron = "0.15"
@@ -173,8 +173,8 @@ which = "7"
 arboard = { version = "3", default-features = false }
 
 # Office
-calamine = "0.36"
-rust_xlsxwriter = "0.82"
+calamine = "0.38"
+rust_xlsxwriter = "0.102"
 sha1 = "0.10"
 sha2 = "0.10"
 
@@ -184,11 +184,11 @@ aws-sdk-bedrock = { version = "1", default-features = false, features = ["rt-tok
 aws-sdk-bedrockruntime = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
 
 # TLS
-rustls = "0.23"
+rustls = "0.23.46"
 rustls-native-certs = "0.8"
 
-# Pin rustls-webpki to fix RUSTSEC-2026-{0098,0099,0104}
-rustls-webpki = "0.103.13"
+# Require the patched certificate distrust checks.
+rustls-webpki = "0.103.16"
 
 # OAuth / MCP
 oauth2 = "5.0.0-rc.1"

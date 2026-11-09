@@ -2096,7 +2096,7 @@ pub fn parse_frontmatter_fields(content: &str) -> Option<(String, String)> {
     }
 
     let frontmatter = extract_frontmatter_text(content)?;
-    let parsed = serde_yaml::from_str::<SkillFrontmatter>(frontmatter).ok()?;
+    let parsed = serde_saphyr::from_str::<SkillFrontmatter>(frontmatter).ok()?;
     let description = parsed.description.trim().to_string();
 
     if description.is_empty() {
