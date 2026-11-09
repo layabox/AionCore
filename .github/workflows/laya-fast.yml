@@ -1,7 +1,7 @@
 name: LayaAir ACPCore runtime
 on:
   push:
-    branches: [codex/agent-test-diagnostics, codex/goal-status, codex/mcp-permission-identity, codex/fast-mode, codex/request-user-input, codex/agent-launch-arguments, codex/skill-path-containment]
+    branches: [codex/startup-recovery-index, codex/agent-test-diagnostics, codex/goal-status, codex/mcp-permission-identity, codex/fast-mode, codex/request-user-input, codex/agent-launch-arguments, codex/skill-path-containment]
   workflow_dispatch:
 permissions:
   contents: read
@@ -41,6 +41,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: Remove-Item 'C:\Program Files\Git\usr\bin\link.exe' -Force -ErrorAction SilentlyContinue
+      - name: Verify startup recovery index migration and query plan
+        run: cargo test -p aionui-db --test stale_runtime_index_migration --locked
       - run: cargo test -p aionui-ai-agent --lib custom_agent_probe --locked
       - run: cargo test -p aionui-ai-agent --lib probe_diagnostics --locked
       - run: cargo test -p aionui-session --lib native_goal --locked
@@ -80,6 +82,8 @@ jobs:
         run: python scripts/write-runtime-provenance.py --platform ${{ matrix.platform }} --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.binary }} --output release-artifact
       - name: Verify existing Lark and Weixin conversations with the packaged executable
         run: node scripts/smoke-acpcore-channel-skill-paths.cjs release-artifact/${{ matrix.binary }}
+      - name: Verify packaged runtime startup index upgrade and repeated startup
+        run: python scripts/smoke-startup-recovery-index.py release-artifact/${{ matrix.binary }}
       - uses: actions/upload-artifact@v4
         with:
           name: acp-core-${{ matrix.platform }}-${{ github.sha }}
