@@ -89,4 +89,4 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - run: cargo install cargo-audit --locked
-      - run: cargo audit --locked --deny warnings
+      - run: cargo audit --file Cargo.lock --deny warnings

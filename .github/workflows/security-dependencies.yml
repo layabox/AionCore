@@ -22,7 +22,7 @@ jobs:
           cargo update --verbose
           cargo metadata --format-version 1 --locked > dependency-metadata.json
       - name: Audit complete resolved lockfile including warnings
-        run: cargo audit --locked --deny warnings --json > dependency-audit.json
+        run: cargo audit --file Cargo.lock --deny warnings --json > dependency-audit.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
