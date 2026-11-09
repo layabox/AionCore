@@ -1,5 +1,6 @@
 """Exercise the packaged executable's upgrade/recovery in a disposable database."""
 import argparse
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -65,7 +66,7 @@ with tempfile.TemporaryDirectory(prefix="acpcore-recovery-index-") as directory:
     try:
         start()
         stop()
-        with sqlite3.connect(db_path) as db:
+        with closing(sqlite3.connect(db_path)) as db, db:
             db.execute("DROP INDEX idx_messages_stale_runtime")
             db.execute("DELETE FROM _sqlx_migrations WHERE version = 46")
             db.execute("INSERT INTO conversations (id,user_id,name,type,created_at,updated_at) "
@@ -80,7 +81,7 @@ with tempfile.TemporaryDirectory(prefix="acpcore-recovery-index-") as directory:
             history = db.execute("SELECT id,content,status FROM messages WHERE id LIKE 'history-%' ORDER BY id").fetchall()
         start()
         stop()
-        with sqlite3.connect(db_path) as db:
+        with closing(sqlite3.connect(db_path)) as db, db:
             assert db.execute("SELECT count(*) FROM sqlite_master WHERE name='idx_messages_stale_runtime'").fetchone()[0] == 1
             migration = db.execute("SELECT * FROM _sqlx_migrations WHERE version=46 AND success=1").fetchall()
             assert len(migration) == 1
@@ -90,7 +91,7 @@ with tempfile.TemporaryDirectory(prefix="acpcore-recovery-index-") as directory:
             version = db.execute("PRAGMA schema_version").fetchone()[0]
         start()
         stop()
-        with sqlite3.connect(db_path) as db:
+        with closing(sqlite3.connect(db_path)) as db, db:
             assert db.execute("SELECT * FROM _sqlx_migrations WHERE version=46 AND success=1").fetchall() == migration
             assert db.execute("PRAGMA schema_version").fetchone()[0] == version
             assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
