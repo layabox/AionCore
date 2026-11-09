@@ -313,17 +313,14 @@ impl BackendConnection for ClaudeConnection {
     async fn open_session(
         &self,
         spec: SessionSpec,
-        mut config: SessionConfig,
+        config: SessionConfig,
     ) -> Result<Arc<dyn SessionBackend>, BackendError> {
         let (logical_id, claude_session_id, legacy_spec) = Self::to_legacy_spec(&spec);
         let adapter = ClaudeAdapter::new();
-        // Verified: claude-native-2.1.267-remote-goal.ndjson. This opts into
-        // structured active_goal state; without it native stdio omits Goal events.
-        config.spawn_env.retain(|v| v.name != "CLAUDE_CODE_REMOTE");
-        config.spawn_env.push(aionui_common::EnvVar {
-            name: "CLAUDE_CODE_REMOTE".into(),
-            value: "1".into(),
-        });
+        // Do not force CLAUDE_CODE_REMOTE for Goal telemetry. Real 2.1.267
+        // A/B evidence: docs/protocol-schemas/claude-model-discovery/auth-mode.json.
+        // The same provider succeeds normally and rejects requests in remote mode.
+        // Preserve the operator's CLI environment, including an explicit opt-in.
 
         // Build the init flags claude is spawned with from the session-init surface
         // (MCP / preset / model / permission-mode). The clean-slate seam owns this
@@ -3134,6 +3131,21 @@ impl SessionBackend for ClaudeSessionBackend {
             return self
                 .goal_snapshot()
                 .ok_or(BackendError::CommandNotSupported { command: "goal" });
+        }
+        // A slash-command advertisement alone does not prove structured Goal
+        // state is available: 2.1.267 advertises /goal in both auth modes. Require
+        // an observed state or the operator's explicit remote-mode opt-in.
+        let remote_opt_in = self
+            .wake
+            .env
+            .iter()
+            .rev()
+            .find(|entry| entry.name == "CLAUDE_CODE_REMOTE")
+            .map(|entry| entry.value.clone())
+            .or_else(|| std::env::var("CLAUDE_CODE_REMOTE").ok())
+            .is_some_and(|value| value == "1");
+        if self.goal_snapshot().is_none() && !remote_opt_in {
+            return Err(BackendError::CommandNotSupported { command: "goal" });
         }
         let _goal_guard = self.goal_operation_lock.lock().await;
         // Explicit mutations may wake; GET never enters this path.
@@ -7008,26 +7020,54 @@ mod tests {
         assert_eq!(tok.map(|e| e.value.as_str()), Some("tok-123"));
     }
 
-    /// No provider overrides are fabricated when spawn_env is empty. The native
-    /// structured Goal stream still needs its explicit opt-in (verified:
-    /// backend/claude_goal.capture.ndjson and docs/goal-protocol-sources.md).
+    /// Regression for the live auth-mode A/B capture: normal chat must not
+    /// silently enter a different CLI authentication mode to enable Goal events.
     #[tokio::test]
-    async fn empty_spawn_env_only_enables_structured_goal_stream() {
+    async fn native_goal_remote_mode_is_never_forced_and_explicit_values_are_preserved() {
         use crate::testing::FakeSpawner;
-        let spawner = Arc::new(FakeSpawner::new());
-        let conn = ClaudeConnection::new(spawner.clone());
-        let _ = conn
-            .open_session(
-                SessionSpec::Fresh {
-                    session_id: "22222222-2222-4222-8222-222222222222".into(),
-                },
-                SessionConfig::default(),
-            )
-            .await;
-        let spec = spawner.last_command().await.expect("a spawn was recorded");
-        assert_eq!(spec.env.len(), 1);
-        assert_eq!(spec.env[0].name, "CLAUDE_CODE_REMOTE");
-        assert_eq!(spec.env[0].value, "1");
+        for requested in [None, Some("0"), Some("1")] {
+            let spawner = Arc::new(FakeSpawner::new());
+            let conn = ClaudeConnection::new(spawner.clone());
+            let config = SessionConfig {
+                spawn_env: requested
+                    .map(|value| aionui_common::EnvVar {
+                        name: "CLAUDE_CODE_REMOTE".into(),
+                        value: value.into(),
+                    })
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            };
+            let _ = conn
+                .open_session(
+                    SessionSpec::Fresh {
+                        session_id: "22222222-2222-4222-8222-222222222222".into(),
+                    },
+                    config,
+                )
+                .await;
+            let spec = spawner.last_command().await.expect("a spawn was recorded");
+            assert_eq!(
+                spec.env
+                    .iter()
+                    .find(|entry| entry.name == "CLAUDE_CODE_REMOTE")
+                    .map(|entry| entry.value.as_str()),
+                requested
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_goal_without_observed_state_does_not_send_a_slash_command() {
+        let io = FakeAgentIo::never_exits(Vec::new());
+        let captured = io.captured_stdin();
+        let backend = ClaudeSessionBackend::build_with_io("local-goal", Box::new(io)).await;
+        let result = backend.goal_operation(super::super::GoalOperation::Clear).await;
+        assert!(matches!(
+            result,
+            Err(BackendError::CommandNotSupported { command: "goal" })
+        ));
+        assert!(captured.lock().await.is_empty());
     }
 
     /// F-4 #1-critical regression: a turn in flight (set by dispatch(Send)) must

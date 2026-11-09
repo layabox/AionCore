@@ -1,0 +1,34 @@
+{
+  "cli": "2.1.267",
+  "capture": "Isolated native stream-json calls; prompt only requests OK; tools, MCP, hooks and session persistence disabled. Credentials and provider URL omitted.",
+  "cases": [
+    {
+      "mode": "normal",
+      "resolvedModel": "deepseek-flash[1m]",
+      "is_error": false,
+      "result": "OK"
+    },
+    {
+      "mode": "cc-switch-env-only",
+      "resolvedModel": "deepseek-flash[1m]",
+      "is_error": false,
+      "result": "OK"
+    },
+    {
+      "mode": "cc-switch-env-and-CLAUDE_CODE_REMOTE=1",
+      "resolvedModel": "deepseek-flash[1m]",
+      "is_error": true,
+      "result": "Authentication error · This may be a temporary network issue, please try again"
+    },
+    {
+      "mode": "plugin-startup-flags-without-remote-mode",
+      "resolvedModel": "deepseek-flash[1m]",
+      "is_error": false,
+      "result": "OK"
+    }
+  ],
+  "goalCommandAdvertised": {
+    "normal": true,
+    "CLAUDE_CODE_REMOTE=1": true
+  }
+}

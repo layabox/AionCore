@@ -21,6 +21,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     await fs.writeFile(responsePath, JSON.stringify(fixture));
     await fs.writeFile(fakeScript, `
       const fs = require('node:fs');
+      require('node:assert/strict').equal(process.env.CLAUDE_CODE_REMOTE, '0', 'the native connection must preserve the operator auth mode');
       if (process.argv.includes('--version')) { console.log('2.1.267 (Claude Code)'); process.exit(0); }
       fs.appendFileSync(process.env.CATALOG_TRACE, JSON.stringify({pid:process.pid,cwd:process.cwd(),args:process.argv.slice(2),kind:'spawn'})+'\\n');
       const readline = require('node:readline').createInterface({input:process.stdin});
@@ -61,6 +62,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     assert(agent);
     await request(`/api/agents/${agent.id}/overrides`, { command_override: launcher, env_override: [
       { name: "CATALOG_TRACE", value: trace }, { name: "CATALOG_MODELS", value: responsePath },
+      { name: "CLAUDE_CODE_REMOTE", value: "0" },
     ] }, "PUT");
     const conversations = await request("/api/conversations");
     const route = `/api/agents/${agent.id}/refresh-config`;
@@ -88,6 +90,27 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     assert.equal(models(await request(route, {}))[1].name, "updated-provider-model", "a later visit must refresh the catalog");
     const persisted = (await request("/api/agents/management")).find((row) => row.id === agent.id);
     assert.equal(models(persisted)[1].name, "updated-provider-model");
+    fixture.response.response.models = [{ value: "only-current-model", displayName: "Current provider model", description: "Updated directory" }];
+    await fs.writeFile(responsePath, JSON.stringify(fixture));
+    assert.equal(models(await request(route, {})).length, 1, "refresh must remove stale model choices");
+    fixture.response.response.models = [];
+    await fs.writeFile(responsePath, JSON.stringify(fixture));
+    const failed = await fetch(base + route, { method: "POST", signal: AbortSignal.timeout(40_000) });
+    assert.equal(failed.status, 504, "an empty native model response must time out rather than pretend to be fresh");
+    assert.equal((await failed.json()).code, "GATEWAY_TIMEOUT");
+    events = (await fs.readFile(trace, "utf8")).trim().split("\n").map(JSON.parse);
+    for (const launched of events.filter((event) => event.kind === "spawn")) {
+      for (let attempt = 0; attempt < 50; attempt++) {
+        try { process.kill(launched.pid, 0); await delay(100); }
+        catch (error) { assert.equal(error.code, "ESRCH"); break; }
+        if (attempt === 49) assert.fail("a successful or timed-out discovery process survived cleanup");
+      }
+    }
+    const retained = (await request("/api/agents/management")).find((row) => row.id === agent.id);
+    assert.equal(models(retained)[0].value, "only-current-model", "failed discovery must preserve the last good catalog");
+    fixture.response.response.models = [{ value: "retry-model", displayName: "Retry model" }];
+    await fs.writeFile(responsePath, JSON.stringify(fixture));
+    assert.equal(models(await request(route, {}))[0].value, "retry-model", "failed refresh must be retryable");
     console.log("Claude catalog packaged smoke passed: native fixture, aliases, coalescing, persistence, no prompt/conversation, and process cleanup.");
   } finally {
     if (child?.exitCode === null && child.signalCode === null) { child.kill(); await once(child, "exit"); }
