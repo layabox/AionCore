@@ -1,0 +1,86 @@
+name: LayaAir Claude catalog macOS fallback
+on:
+  push:
+    branches: [codex/claude-catalog-macos]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  darwin-arm64:
+    runs-on: macos-15-intel
+    env:
+      ACPCORE_SOURCE_COMMIT: 57566db2bfb29331a022d2e78cc8e06e3144d4d2
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_PROFILE_RELEASE_STRIP: 'none'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.ACPCORE_SOURCE_COMMIT }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.95.0'
+          targets: aarch64-apple-darwin
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-intel-to-arm64
+      - name: Verify native authentication mode and catalog orchestration
+        run: |
+          cargo test -p aionui-session --lib native_goal --locked
+          cargo test -p aionui-ai-agent --lib claude_catalog_refresh --locked
+          cargo test -p aionui-app --test agent_catalog_refresh_e2e --locked
+      - name: Build the host executable for macOS process and HTTP smoke tests
+        run: cargo build -p aionui-app --locked
+      - name: Verify native macOS catalog refresh, failure cleanup and retry
+        run: node scripts/smoke-claude-model-catalog.cjs target/debug/aioncore
+      - name: Verify native macOS startup migration and existing channel isolation
+        run: |
+          python scripts/smoke-startup-recovery-index.py target/debug/aioncore
+          node scripts/smoke-acpcore-channel-skill-paths.cjs target/debug/aioncore
+      - name: Cross-build the pinned ARM64 runtime
+        run: cargo build --release --target aarch64-apple-darwin -p aionui-app --locked
+      - name: Verify architecture, linkage, version source and build provenance
+        run: |
+          python3 - <<'PYCODE'
+          import hashlib, json, os, pathlib, shutil, struct, subprocess
+          source = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          assert source == os.environ["ACPCORE_SOURCE_COMMIT"]
+          subprocess.run(["git", "diff", "--exit-code"], check=True)
+          binary = pathlib.Path("target/aarch64-apple-darwin/release/aioncore")
+          with binary.open("rb") as stream:
+              header = stream.read(8)
+          assert header[:4] == b"\xcf\xfa\xed\xfe"
+          assert struct.unpack_from("<I", header, 4)[0] == 0x0100000c
+          version = subprocess.check_output(["target/debug/aioncore", "--version"], text=True).strip().split()[-1]
+          assert version == "0.2.2+layabox.9"
+          out = pathlib.Path("release-artifact")
+          out.mkdir()
+          shutil.copy2(binary, out / "aioncore")
+          provenance = {
+              "schemaVersion": 1,
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "sourceCommit": source,
+              "workflowCommit": os.environ["GITHUB_SHA"],
+              "workflowRun": "https://github.com/" + os.environ["GITHUB_REPOSITORY"] + "/actions/runs/" + os.environ["GITHUB_RUN_ID"],
+              "platform": "darwin-arm64",
+              "target": "aarch64-apple-darwin",
+              "compiler": subprocess.check_output(["rustc", "--version"], text=True).strip(),
+              "runtimeVersion": version,
+              "binarySha256": hashlib.file_digest(binary.open("rb"), "sha256").hexdigest(),
+              "crossCompiled": True,
+              "verificationHostTarget": "x86_64-apple-darwin",
+              "packagedSmokeTarget": "x86_64-apple-darwin"
+          }
+          (out / "BUILD_PROVENANCE.json").write_text(json.dumps(provenance, indent=2) + "\n")
+          print(json.dumps(provenance, indent=2))
+          PYCODE
+          file target/aarch64-apple-darwin/release/aioncore
+          otool -L target/aarch64-apple-darwin/release/aioncore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acp-core-darwin-arm64-${{ env.ACPCORE_SOURCE_COMMIT }}
+          path: release-artifact/
+          if-no-files-found: error
