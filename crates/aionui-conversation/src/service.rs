@@ -4722,6 +4722,7 @@ impl ConversationService {
             }
         };
 
+        self.refresh_negotiated_mcp_statuses(user_id, conversation_id).await?;
         self.ensure_background_watcher(user_id, conversation_id, &agent);
 
         // Persist auto-resolved workspace if factory picked a different path.
@@ -5335,6 +5336,71 @@ impl ConversationService {
     /// `None`), deduped by name and classified against the agent's transport
     /// support. Shared by `create()` and the team refresh path so both persist
     /// the exact same snapshot shape.
+    async fn refresh_negotiated_mcp_statuses(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<(), ConversationError> {
+        let row = self
+            .conversation_repo
+            .get(user_id, conversation_id)
+            .await?
+            .ok_or_else(|| ConversationError::NotFound {
+                id: conversation_id.to_owned(),
+            })?;
+        if parse_agent_type_from_row(&row) != Some(AgentType::Acp) {
+            return Ok(());
+        }
+        let extra: serde_json::Value = serde_json::from_str(&row.extra)
+            .map_err(|e| ConversationError::internal(format!("Invalid extra JSON: {e}")))?;
+        let servers: Vec<SessionMcpServer> = extra
+            .get("session_mcp_servers")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| ConversationError::internal(format!("Invalid session MCP snapshot: {e}")))?
+            .unwrap_or_default();
+        let ids: Option<Vec<String>> = extra
+            .get("mcp_server_ids")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| ConversationError::internal(format!("Invalid MCP selection: {e}")))?;
+        let old: Vec<ConversationMcpStatus> = extra
+            .get("mcp_statuses")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| ConversationError::internal(format!("Invalid MCP statuses: {e}")))?
+            .unwrap_or_default();
+        // Keep real validation/connection failures. Only transport preflight
+        // results are replaced by the serialized live handshake writeback.
+        let failures: Vec<_> = old
+            .into_iter()
+            .filter(|status| status.status == ConversationMcpStatusKind::Failed)
+            .collect();
+        let snapshot = self
+            .build_runtime_mcp_snapshot(user_id, ids.as_deref(), &servers, &failures, &AgentType::Acp, &extra)
+            .await?;
+        let statuses = serde_json::to_value(snapshot.mcp_statuses)
+            .map_err(|e| ConversationError::internal(format!("Invalid MCP statuses: {e}")))?;
+        if extra.get("mcp_statuses") != Some(&statuses) {
+            self.update_extra(user_id, conversation_id, serde_json::json!({"mcp_statuses": statuses}))
+                .await?;
+            let source = row
+                .source
+                .as_deref()
+                .map(string_to_enum::<ConversationSource>)
+                .transpose()?;
+            self.broadcast_list_changed(user_id, conversation_id, "updated", source.as_ref());
+            info!(
+                conversation_id,
+                "Conversation MCP preflight refreshed after runtime negotiation"
+            );
+        }
+        Ok(())
+    }
+
     async fn build_runtime_mcp_snapshot(
         &self,
         user_id: &str,

@@ -1863,6 +1863,13 @@ async fn reader_task(
                 sniff_replay_prompt_ack(v, &event_tx, &session_id, cur_gen);
             }
             for mut ev in events {
+                if let SessionEvent::Notice {
+                    supersedes_key: Some(key),
+                    ..
+                } = &mut ev
+                {
+                    *key = format!("{key}:turn-{cur_gen}");
+                }
                 if let SessionEvent::Permission {
                     request_id, metadata, ..
                 } = &mut ev

@@ -33,6 +33,9 @@ const ERROR_KEYWORDS: &[&str] = &[
     "api key",
     "quota",
     "billing",
+    "insufficient account balance",
+    "insufficient_balance",
+    "payment required",
 ];
 
 const MAX_MESSAGE_CHARS: usize = 240;
@@ -130,6 +133,14 @@ mod tests {
     use super::extract_error_message;
 
     const STDERR_USAGE_LIMIT: &str = "\u{1b}[2m2026-05-13T20:01:21.330370Z\u{1b}[0m \u{1b}[31mERROR\u{1b}[0m \u{1b}[2mcodex_acp::thread\u{1b}[0m\u{1b}[2m:\u{1b}[0m Unhandled error during turn: You've hit your usage limit. To get more access now, send a request to your admin or try again at May 14th, 2026 8:16 PM. Some(UsageLimitExceeded)";
+
+    #[test]
+    fn extracts_balance_error_without_a_billing_keyword() {
+        let message = extract_error_message("ERROR HTTP 402: Insufficient account balance")
+            .expect("balance errors must not become benign empty turns");
+        assert_eq!(message, "Insufficient account balance");
+        assert!(extract_error_message("ordinary tool output").is_none());
+    }
 
     #[test]
     fn extracts_usage_limit_message() {

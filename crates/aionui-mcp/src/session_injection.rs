@@ -123,7 +123,10 @@ pub fn parse_acp_mcp_capabilities(response: &serde_json::Value) -> AcpMcpCapabil
 
     let http = bool_field(caps, "http");
     let sse = bool_field(caps, "sse");
-    let stdio = bool_field(caps, "stdio") || http || sse;
+    // verified: agent-client-protocol-schema-1.5.0/src/v1/agent.rs,
+    // McpServer::Stdio: all ACP v1 agents MUST support the baseline transport.
+    // Preserve an explicit internal descriptor; v1 wire snapshots omit this key.
+    let stdio = caps.get("stdio").and_then(serde_json::Value::as_bool).unwrap_or(true);
 
     AcpMcpCapabilities { stdio, http, sse }
 }
@@ -345,7 +348,7 @@ mod tests {
             "mcp": { "stdio": false, "http": true, "sse": false }
         });
         let caps = parse_acp_mcp_capabilities(&resp);
-        assert!(caps.stdio);
+        assert!(!caps.stdio, "explicit internal stdio=false must be preserved");
         assert!(caps.http);
         assert!(!caps.sse);
     }
@@ -377,6 +380,16 @@ mod tests {
         assert!(caps.stdio);
         assert!(caps.http);
         assert!(!caps.sse);
+    }
+
+    #[test]
+    fn parse_v1_empty_remote_capabilities_preserves_stdio_baseline() {
+        for remote in [serde_json::json!({}), serde_json::json!({"http":false,"sse":false})] {
+            let caps = parse_acp_mcp_capabilities(&serde_json::json!({"mcpCapabilities":remote}));
+            assert!(caps.stdio);
+            assert!(!caps.http);
+            assert!(!caps.sse);
+        }
     }
 
     #[test]

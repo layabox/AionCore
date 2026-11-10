@@ -15,9 +15,9 @@ pub struct WorkspaceInfo {
 /// All pre-computed parameters needed to create and drive an ACP session.
 ///
 /// Assembled once by `assemble_acp_params` in the factory layer; the
-/// `AcpAgentManager` reads from this but never mutates it. By front-loading
-/// the decision logic (which MCP servers to inject, what preset context to
-/// compose) we keep the manager focused on execution + state.
+/// `AcpAgentManager` freezes a copy after filtering candidate MCP transports
+/// against the live initialize response. Workspace and preset composition stay
+/// in the factory; protocol capability negotiation stays with the manager.
 #[derive(Debug, Clone)]
 pub struct AcpSessionParams {
     pub conversation_id: String,

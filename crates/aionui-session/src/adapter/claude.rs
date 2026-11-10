@@ -365,8 +365,18 @@ impl ClaudeAdapter {
                 self.last_call_tokens = None;
                 vec![SessionEvent::Heartbeat]
             }
-            // network backoff + the no-chunk compaction window both = liveness.
-            "api_retry" | "compacting" => vec![SessionEvent::Heartbeat],
+            // verified: this adapter's recorded system/api_retry family. Keep
+            // liveness and also forward a visible, backend-neutral notice.
+            "api_retry" => vec![
+                SessionEvent::Heartbeat,
+                SessionEvent::Notice {
+                    level: crate::event::NoticeLevel::Warning,
+                    message: "The Agent is retrying a model request. You can wait or cancel the request.".to_owned(),
+                    localized: None,
+                    supersedes_key: Some("claude-api-retry".to_owned()),
+                },
+            ],
+            "compacting" => vec![SessionEvent::Heartbeat],
             other => vec![SessionEvent::AdapterSpecific {
                 tag: format!("system/{other}"),
                 payload: v.clone(),
@@ -3157,11 +3167,28 @@ mod tests {
         assert!(sys("init").is_empty(), "init carries no signal");
 
         // network backoff + compaction window → Heartbeat (liveness).
-        for subtype in ["api_retry", "compact_boundary", "compacting"] {
+        for subtype in ["compact_boundary", "compacting"] {
             assert!(
                 matches!(sys(subtype).as_slice(), [SessionEvent::Heartbeat]),
                 "`{subtype}` must normalize to a single Heartbeat"
             );
+        }
+
+        match sys("api_retry").as_slice() {
+            [
+                SessionEvent::Heartbeat,
+                SessionEvent::Notice {
+                    level,
+                    message,
+                    supersedes_key,
+                    ..
+                },
+            ] => {
+                assert_eq!(*level, crate::event::NoticeLevel::Warning);
+                assert!(message.contains("retrying"));
+                assert_eq!(supersedes_key.as_deref(), Some("claude-api-retry"));
+            }
+            other => panic!("retry must preserve liveness and explain the wait: {other:?}"),
         }
 
         // unknown subtype → opaque AdapterSpecific tagged `system/<subtype>` (never lost,

@@ -13,6 +13,7 @@ parser.add_argument("--platform", required=True, choices=["darwin-arm64", "win32
 parser.add_argument("--target", required=True)
 parser.add_argument("--binary", type=Path, required=True)
 parser.add_argument("--output", type=Path, required=True)
+parser.add_argument("--version-binary", type=Path)
 args = parser.parse_args()
 source = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
 assert source == os.environ["GITHUB_SHA"]
@@ -38,7 +39,9 @@ provenance = {
     "platform": args.platform,
     "target": args.target,
     "compiler": subprocess.check_output(["rustc", "--version"], text=True).strip(),
-    "runtimeVersion": subprocess.check_output([str(args.binary.resolve()), "--version"], text=True).strip().split()[-1],
+    "runtimeVersion": subprocess.check_output([str((args.version_binary or args.binary).resolve()), "--version"], text=True).strip().split()[-1],
+    "crossCompiled": args.version_binary is not None,
+    "packagedSmokeTarget": "x86_64-apple-darwin" if args.version_binary else args.target,
     "binarySha256": hashlib.file_digest(args.binary.open("rb"), "sha256").hexdigest(),
 }
 args.output.mkdir(parents=True, exist_ok=True)

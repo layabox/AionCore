@@ -636,7 +636,7 @@ impl AcpAgentManager {
         AgentError,
     > {
         let (this, domain_event_rx, notification_rx) = AcpAgentManager::new(params, skill_manager).await?;
-        this.init(catalog_tx).await;
+        this.init(catalog_tx).await?;
         Ok((this, domain_event_rx, notification_rx))
     }
 
@@ -681,6 +681,30 @@ impl AcpAgentManager {
             snapshot.map(|s| s.config_selections.clone()).unwrap_or_default(),
         );
 
+        // verified: agent-client-protocol-schema-1.5.0/src/v1/agent.rs,
+        // McpCapabilities: HTTP/SSE are negotiated by initialize, not metadata.
+        let mut resolved = params.as_ref().clone();
+        let capabilities = protocol
+            .agent_capabilities()
+            .map(|c| c.mcp_capabilities)
+            .unwrap_or_default();
+        let candidates = resolved.mcp_servers.len();
+        resolved.mcp_servers.retain(|server| match server {
+            agent_client_protocol::schema::v1::McpServer::Http(_) => capabilities.http,
+            agent_client_protocol::schema::v1::McpServer::Sse(_) => capabilities.sse,
+            agent_client_protocol::schema::v1::McpServer::Stdio(_) => true,
+            _ => false,
+        });
+        info!(
+            conversation_id = %params.conversation_id,
+            candidates,
+            accepted = resolved.mcp_servers.len(),
+            http = capabilities.http,
+            sse = capabilities.sse,
+            "ACP MCP candidates resolved from live initialize"
+        );
+        let params = Arc::new(resolved);
+
         let startup_config_seed_base = initial_config.clone();
         let mut session = AcpSession::new(initial_mode, initial_model, initial_config);
         preload_metadata_catalogs(
@@ -711,18 +735,20 @@ impl AcpAgentManager {
         Ok((manager, domain_event_rx, notification_rx))
     }
 
-    async fn init(&self, catalog_tx: &CatalogSender) {
+    async fn init(&self, catalog_tx: &CatalogSender) -> Result<(), AgentError> {
         let init_handshake = AgentHandshake {
             agent_capabilities: self.protocol.agent_capabilities().and_then(|c| sdk_to_snake_value(&c)),
             auth_methods: self.protocol.auth_methods().and_then(|m| sdk_to_snake_value(&m)),
             ..Default::default()
         };
         if init_handshake.agent_capabilities.is_some() || init_handshake.auth_methods.is_some() {
-            catalog_tx.send_partial(
-                self.params.user_id.clone(),
-                self.params.metadata.id.clone(),
-                init_handshake,
-            );
+            catalog_tx
+                .send_partial_and_wait(
+                    self.params.user_id.clone(),
+                    self.params.metadata.id.clone(),
+                    init_handshake,
+                )
+                .await?;
         }
 
         // Seed the observed/advertised layers (observed mode/model, cached
@@ -743,6 +769,7 @@ impl AcpAgentManager {
             let mut session = self.session.write().await;
             session.apply_advertised_auth_methods(auth_methods);
         }
+        Ok(())
     }
 }
 

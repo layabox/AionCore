@@ -21,7 +21,7 @@ use super::agent::sdk_to_snake_value;
 use super::agent_close::STDERR_PEEK_LINES;
 use super::error_mapping::{AcpSendFailure, is_acp_session_not_found, is_missing_resumed_session};
 use super::legacy_session_model::LegacySessionModelState;
-use tracing::warn;
+use tracing::{info, warn};
 
 #[derive(Debug)]
 pub(super) enum PromptOutcome {
@@ -350,8 +350,7 @@ impl AcpAgentManager {
         self.process.clear_stderr().await;
 
         let prompt_response = self
-            .protocol
-            .prompt(PromptRequest::new(SessionId::new(sid), prompt_blocks))
+            .prompt_with_wait_feedback(PromptRequest::new(SessionId::new(sid), prompt_blocks), data)
             .await
             .map_err(AcpSendFailure::from)?;
 
@@ -468,6 +467,67 @@ impl AcpAgentManager {
                 .emit(AgentStreamEvent::AvailableCommands(AvailableCommandsEventData {
                     commands: cmds.to_vec(),
                 }));
+        }
+    }
+
+    async fn prompt_with_wait_feedback(
+        &self,
+        request: PromptRequest,
+        data: &SendMessageData,
+    ) -> Result<PromptResponse, AcpError> {
+        let mut activity = self.runtime.subscribe();
+        let prompt = self.protocol.prompt(request);
+        tokio::pin!(prompt);
+        let started = tokio::time::Instant::now();
+        let mut pulse = tokio::time::interval(std::time::Duration::from_secs(2));
+        let mut visible = false;
+        let mut notice: Option<String> = None;
+        let key = format!("acp-waiting:{}", data.msg_id);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut prompt => {
+                    if notice.is_some() {
+                        self.runtime.emit(AgentStreamEvent::Tips(TipsEventData {
+                            content: "The Agent request has finished.".to_owned(),
+                            tip_type: TipType::Info,
+                            code: None,
+                            params: None,
+                            supersedes_key: Some(key),
+                        }));
+                    }
+                    return result;
+                }
+                _ = pulse.tick() => {
+                    loop {
+                        match activity.try_recv() {
+                            Ok(event) => visible |= event_is_user_visible_output(&event),
+                            Err(TryRecvError::Lagged(_)) => visible = true,
+                            Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+                        }
+                    }
+                    if visible { continue; }
+                    let error = self.empty_turn_terminal_error().await;
+                    // Never expose raw stderr or assert that an active request has
+                    // failed: an auxiliary request may have logged the error.
+                    let text = if let Some(error) = error {
+                        format!("An upstream issue was reported while this request is still active: {}. The Agent may be retrying; you can cancel the request.", error.message)
+                    } else if started.elapsed() >= std::time::Duration::from_secs(20) {
+                        "Waiting for the Agent to respond. No response content has arrived yet; the request is still active and can be cancelled.".to_owned()
+                    } else { continue; };
+                    if notice.as_ref() != Some(&text) {
+                        info!(conversation_id = %self.params.conversation_id, "ACP request is waiting without visible output");
+                        self.runtime.emit(AgentStreamEvent::Tips(TipsEventData {
+                            content: text.clone(),
+                            tip_type: TipType::Warning,
+                            code: None,
+                            params: None,
+                            supersedes_key: Some(key.clone()),
+                        }));
+                        notice = Some(text);
+                    }
+                }
+            }
         }
     }
 

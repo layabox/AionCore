@@ -811,3 +811,35 @@ The authenticated, CSRF-protected POST agent refresh-config operation uses the i
 Protocol evidence: docs/protocol-schemas/claude-model-discovery/initialize.json (real CLI 2.1.267, no prompt). Foundation impact: the existing native connection/Capabilities surface is reused unchanged; the catalog queue gains an optional completion acknowledgment so explicit reads cannot race persistence. Info logs record only Agent identity and model count; warnings record a bounded failure category without config values or raw protocol data.
 
 Claude native auth-mode parity: do not inject `CLAUDE_CODE_REMOTE` during open or wake. The operator's environment is preserved. Real CLI 2.1.267 A/B evidence is in `docs/protocol-schemas/claude-model-discovery/auth-mode.json`. Goal mutations without structured state require explicit remote-mode opt-in; a slash-command name alone does not establish the telemetry contract. This prevents normal third-party-provider chat from inheriting a different authentication mode solely for Goal events.
+
+
+## ACP session MCP negotiation and wait feedback
+
+MCP candidates are validated/resolved by the factory but are filtered only after
+the current ACP process completes initialize. Cached catalog capabilities cannot
+drop a cold-start HTTP server or re-enable a transport removed by the live agent.
+Initialize capability writeback uses the existing serialized catalog writer and
+completes before runtime preparation returns; conversation preflight status is
+then refreshed through the existing extra/status and list-change channels. This
+status means transport acceptance, not successful MCP tool discovery.
+
+Verified protocol basis: agent-client-protocol-schema-1.5.0/src/v1/agent.rs,
+McpCapabilities and McpServer::Stdio. ACP v1 stdio is the mandatory baseline;
+HTTP and SSE are explicitly negotiated. No automatic HTTP-to-stdio bridge is
+introduced, and an unknown external CLI is not claimed to implement its contract.
+
+A pending prompt has no fixed execution deadline. Before visible output or a
+permission/tool event, a scoped stderr issue or a twenty-second wait produces a
+replaceable warning. Only classified public summaries are shown while a request
+is active; raw stderr is not copied to this notice. It does not fabricate a
+terminal failure, retry the prompt, or replay side effects. Prompt completion
+replaces the warning. Empty turns still classify provider failures, including
+insufficient-balance messages without the word billing. Claude system/api_retry
+keeps its heartbeat and emits a turn-scoped notice; compaction stays a heartbeat.
+
+Production diagnostics record only capability flags, candidate/accepted counts,
+and the transition into an unexplained wait. They exclude prompts, MCP headers,
+raw provider payloads and stderr. Packaged regression fixtures cover cold/warm/
+stale capabilities, explicit errors, process exit, empty billing failures, silent
+requests and native Claude/Codex retry/terminal events. Synthetic wire fixtures
+verify integration handling, not all vendors' current behavior.

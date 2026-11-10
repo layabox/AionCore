@@ -16,7 +16,7 @@ use aionui_api_types::{AgentMetadata, SessionMcpServer, SessionMcpTransport, TEA
 use aionui_common::CommandSpec;
 use aionui_db::IMcpServerRepository;
 use aionui_db::models::McpServerRow;
-use aionui_mcp::{AcpMcpCapabilities, parse_acp_mcp_capabilities};
+use aionui_mcp::AcpMcpCapabilities;
 use aionui_runtime::{ensure_runtime_command, ensure_runtime_command_with_reporter};
 use tracing::{info, warn};
 
@@ -212,12 +212,13 @@ pub(super) async fn build(
     // ACP `session/new` mcpServers payload. Without this the agent
     // starts with zero MCP tools even when the user configured them
     // via Settings → MCP (ELECTRON-1JG).
-    let mcp_capabilities = meta
-        .handshake
-        .agent_capabilities
-        .as_ref()
-        .map(parse_acp_mcp_capabilities)
-        .unwrap_or_default();
+    // Collect valid candidates here. Cached discovery is not authoritative for
+    // this process: the manager filters against initialize before session/new.
+    let mcp_capabilities = AcpMcpCapabilities {
+        stdio: true,
+        http: true,
+        sse: true,
+    };
 
     let user_mcp_servers = match deps.mcp_server_repo.as_ref() {
         Some(repo) => {
