@@ -476,6 +476,7 @@ impl AcpAgentManager {
         data: &SendMessageData,
     ) -> Result<PromptResponse, AcpError> {
         let mut activity = self.runtime.subscribe();
+        let native_session_id = request.session_id.to_string();
         let prompt = self.protocol.prompt(request);
         tokio::pin!(prompt);
         let started = tokio::time::Instant::now();
@@ -483,6 +484,7 @@ impl AcpAgentManager {
         let mut visible = false;
         let mut notice: Option<String> = None;
         let key = format!("acp-waiting:{}", data.msg_id);
+        let mut native_waiting = false;
         loop {
             tokio::select! {
                 biased;
@@ -506,7 +508,27 @@ impl AcpAgentManager {
                             Err(TryRecvError::Empty | TryRecvError::Closed) => break,
                         }
                     }
-                    if visible { continue; }
+                    if let Some(observed) = self.native_feedback.retry_notice(&native_session_id, &key).await {
+                        if let Some(tip) = observed {
+                            if notice.as_ref() != Some(&tip.content) {
+                                info!(conversation_id = %self.params.conversation_id, "Native Agent scheduled a model retry");
+                                notice = Some(tip.content.clone());
+                                self.runtime.emit(AgentStreamEvent::Tips(tip));
+                            }
+                            native_waiting = true;
+                            continue;
+                        } else if native_waiting {
+                            let text = "The Agent has resumed the model request.".to_owned();
+                            self.runtime.emit(AgentStreamEvent::Tips(TipsEventData {
+                                content: text.clone(), tip_type: TipType::Info,
+                                code: Some("ACP_WAIT_RESUMED".to_owned()), params: None,
+                                supersedes_key: Some(key.clone()),
+                            }));
+                            notice = Some(text);
+                            native_waiting = false;
+                        }
+                    }
+                    if visible || native_waiting { continue; }
                     let error = self.empty_turn_terminal_error().await;
                     // Never expose raw stderr or assert that an active request has
                     // failed: an auxiliary request may have logged the error.

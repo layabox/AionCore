@@ -11,6 +11,7 @@ mod goal_operations;
 pub mod hooks;
 pub mod legacy_session_model;
 pub(crate) mod mode_normalize;
+mod native_feedback;
 pub mod permission_router;
 pub mod session;
 mod stderr_error_extractor;
