@@ -236,5 +236,6 @@ with tempfile.TemporaryDirectory(prefix='laya-agent-audit-') as tmp:
  finally:
   stop()
   if REPORT is not None:
+   REPORT.parent.mkdir(parents=True, exist_ok=True)
    REPORT.write_text(json.dumps(report,ensure_ascii=False,indent=2))
   print('Agent MCP negotiation and wait feedback smoke completed.',flush=True)
