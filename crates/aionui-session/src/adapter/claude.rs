@@ -372,7 +372,7 @@ impl ClaudeAdapter {
                 SessionEvent::Notice {
                     level: crate::event::NoticeLevel::Warning,
                     message: "The Agent is retrying a model request. You can wait or cancel the request.".to_owned(),
-                    localized: None,
+                    localized: Some(crate::event::LocalizedText::new("CLAUDE_RETRYING")),
                     supersedes_key: Some("claude-api-retry".to_owned()),
                 },
             ],

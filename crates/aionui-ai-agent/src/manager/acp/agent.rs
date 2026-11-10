@@ -37,6 +37,36 @@ use tracing::{debug, error, info, warn};
 use super::agent_session_flow::PromptOutcome;
 use super::error_mapping::AcpSendFailure;
 
+/// verified: Pi v1.5.1 core/resolve-config-value.ts. ACP env/header values
+/// are literals; Pi's configuration syntax otherwise evaluates !commands/$vars.
+fn pi_mcp_literal(value: &str) -> String {
+    let escaped = value.replace('$', "$$");
+    if escaped.starts_with('!') {
+        format!("${escaped}")
+    } else {
+        escaped
+    }
+}
+
+fn preserve_pi_mcp_literals(servers: &mut [agent_client_protocol::schema::v1::McpServer]) {
+    use agent_client_protocol::schema::v1::McpServer;
+    for server in servers {
+        match server {
+            McpServer::Http(server) => {
+                for header in &mut server.headers {
+                    header.value = pi_mcp_literal(&header.value);
+                }
+            }
+            McpServer::Stdio(server) => {
+                for env in &mut server.env {
+                    env.value = pi_mcp_literal(&env.value);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The user-visible body inside an [`AgentError`].
 ///
 /// `AgentError`'s `Display` prefixes every variant with its status name
@@ -695,6 +725,13 @@ impl AcpAgentManager {
             agent_client_protocol::schema::v1::McpServer::Stdio(_) => true,
             _ => false,
         });
+        if protocol
+            .initialize_response()
+            .and_then(|r| r.agent_info)
+            .is_some_and(|info| info.name == "@jhillyerd/pi-acp" && info.version == "0.1.0")
+        {
+            preserve_pi_mcp_literals(&mut resolved.mcp_servers);
+        }
         info!(
             conversation_id = %params.conversation_id,
             candidates,
@@ -1759,6 +1796,17 @@ impl AcpAgentManager {
 
 // `augment_with_stderr` and `build_close_reason_from_error` live in
 // `agent_close.rs` to keep this file under the 1000-line budget.
+
+#[cfg(test)]
+mod pi_mcp_literal_tests {
+    #[test]
+    fn preserves_literal_command_and_variable_syntax() {
+        assert_eq!(super::pi_mcp_literal("!printf $HOME"), "$!printf $$HOME");
+        assert_eq!(super::pi_mcp_literal("Bearer ${TOKEN}"), "Bearer $${TOKEN}");
+        assert_eq!(super::pi_mcp_literal("plain"), "plain");
+        assert_eq!(super::pi_mcp_literal("$!literal"), "$$!literal");
+    }
+}
 
 #[cfg(test)]
 mod tests {

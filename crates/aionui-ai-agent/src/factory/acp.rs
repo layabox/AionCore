@@ -977,7 +977,7 @@ mod tests {
         )
         .await
         .expect("resolved release-pinned builtin command spec");
-        assert_eq!(spec.args, vec!["-y", "pi-acp@0.0.34"]);
+        assert_eq!(spec.args, vec!["-y", "@jhillyerd/pi-acp@0.1.0"]);
     }
 
     #[cfg(unix)]

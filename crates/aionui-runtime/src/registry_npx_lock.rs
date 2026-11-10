@@ -14,6 +14,8 @@ struct RegistryNpxLock {
 #[derive(Debug, Deserialize)]
 struct RegistryNpxPackage {
     package: String,
+    #[serde(default)]
+    launch_package: Option<String>,
     version: String,
     #[serde(default)]
     skip_version_probe: bool,
@@ -59,12 +61,13 @@ pub fn pin_registry_npx_args(backend: &str, args: &[String]) -> Result<Vec<Strin
         .ok_or_else(|| RegistryNpxLockError::MissingBackend {
             backend: backend.to_owned(),
         })?;
+    let launch_package = package.launch_package.as_deref().unwrap_or(&package.package);
     let pinned = format!("{}@{}", package.package, package.version);
     let mut found = false;
     let resolved = args
         .iter()
         .map(|arg| {
-            if arg == &package.package {
+            if arg.as_str() == launch_package || arg == &package.package {
                 found = true;
                 pinned.clone()
             } else {
@@ -105,7 +108,7 @@ mod tests {
     #[test]
     fn pins_direct_npx_package() {
         let args = pin_registry_npx_args("pi", &strings(&["-y", "pi-acp"])).unwrap();
-        assert_eq!(args, ["-y", "pi-acp@0.0.34"]);
+        assert_eq!(args, ["-y", "@jhillyerd/pi-acp@0.1.0"]);
     }
 
     #[test]

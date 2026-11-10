@@ -843,3 +843,28 @@ raw provider payloads and stderr. Packaged regression fixtures cover cold/warm/
 stale capabilities, explicit errors, process exit, empty billing failures, silent
 requests and native Claude/Codex retry/terminal events. Synthetic wire fixtures
 verify integration handling, not all vendors' current behavior.
+
+
+### Pi ACP MCP bridge
+
+The builtin Pi launch identity remains `pi-acp`, but the immutable npx lock maps
+it to `@jhillyerd/pi-acp@0.1.0` (MIT, source a393c74351c609ecea7de9553dc5764f6dd3c96b).
+Verified: that commit's src/acp/agent.ts, src/acp/session.ts,
+src/acp/mcp/translate.ts and src/pi-extension/mcp-bridge.ts. The previous
+svkozak/pi-acp 0.0.34 stored mcpServers but did not pass them to Pi. The pinned
+fork carries stdio and streamable HTTP entries to a process-scoped Pi extension
+and calls native registerMcpServer. SSE remains unsupported. This requires a
+Pi runtime with the native API (1.x+); protocol capability is not proof that an
+arbitrary installed Pi version successfully registered or called a tool.
+
+The npm archive integrity and source commit are recorded in the release lock.
+No global Pi configuration is written and no direct plugin-to-Pi channel is added.
+
+ACP values passed through the pinned Pi bridge are escaped as literal config
+values only for the adapter identity/version verified above. Verified native
+semantics: Pi v1.5.1 packages/coding-agent/src/core/resolve-config-value.ts uses
+`$$` for literal `$` and `$!` for literal `!`. Headers and stdio child env must
+not acquire Pi's command/variable evaluation. Packaged Pi smoke asserts the exact
+received values, MCP initialize/tools/list over both transports, and SSE rejection.
+No model prompt is sent; this is registration/discovery verification, not a claim
+about model-generated tool selection.

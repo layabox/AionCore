@@ -57,8 +57,14 @@
     },
     "pi": {
       "registry_json_id": "pi-acp",
-      "package": "pi-acp",
-      "version": "0.0.34"
+      "launch_package": "pi-acp",
+      "package": "@jhillyerd/pi-acp",
+      "version": "0.1.0",
+      "source_repository": "https://github.com/jhillyerd/pi-acp",
+      "source_commit": "a393c74351c609ecea7de9553dc5764f6dd3c96b",
+      "integrity": "sha512-TOpw+DHl5yjfN26sffWBTc6DZhRgf5ntmDWRdcYCqHPQVz7ffky2wGj9QzdE2gek4j/KZ6cxwKcdWu7/78/kJA==",
+      "license": "MIT",
+      "native_pi_requirement": "Pi with registerMcpServer (1.x+)"
     },
     "sigit": {
       "registry_json_id": "sigit",

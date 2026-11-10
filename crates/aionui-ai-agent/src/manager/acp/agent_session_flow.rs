@@ -491,7 +491,7 @@ impl AcpAgentManager {
                         self.runtime.emit(AgentStreamEvent::Tips(TipsEventData {
                             content: "The Agent request has finished.".to_owned(),
                             tip_type: TipType::Info,
-                            code: None,
+                            code: Some("ACP_WAIT_FINISHED".to_owned()),
                             params: None,
                             supersedes_key: Some(key),
                         }));
@@ -510,18 +510,20 @@ impl AcpAgentManager {
                     let error = self.empty_turn_terminal_error().await;
                     // Never expose raw stderr or assert that an active request has
                     // failed: an auxiliary request may have logged the error.
-                    let text = if let Some(error) = error {
-                        format!("An upstream issue was reported while this request is still active: {}. The Agent may be retrying; you can cancel the request.", error.message)
+                    let (text, code, params) = if let Some(error) = error {
+                        (format!("An upstream issue was reported while this request is still active: {}. The Agent may be retrying; you can cancel the request.", error.message),
+                            "ACP_UPSTREAM_WAITING", Some(serde_json::json!({"reason":error.message})))
                     } else if started.elapsed() >= std::time::Duration::from_secs(20) {
-                        "Waiting for the Agent to respond. No response content has arrived yet; the request is still active and can be cancelled.".to_owned()
+                        ("Waiting for the Agent to respond. No response content has arrived yet; the request is still active and can be cancelled.".to_owned(),
+                            "ACP_WAITING_FOR_RESPONSE", None)
                     } else { continue; };
                     if notice.as_ref() != Some(&text) {
                         info!(conversation_id = %self.params.conversation_id, "ACP request is waiting without visible output");
                         self.runtime.emit(AgentStreamEvent::Tips(TipsEventData {
                             content: text.clone(),
                             tip_type: TipType::Warning,
-                            code: None,
-                            params: None,
+                            code: Some(code.to_owned()),
+                            params,
                             supersedes_key: Some(key.clone()),
                         }));
                         notice = Some(text);

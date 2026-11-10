@@ -117,6 +117,16 @@ pub(super) fn extract_error_message(stderr_tail: &str) -> Option<String> {
     }
 
     let line = chosen?;
+    // Wrapped provider JSON contains many `: ` separators. Taking its final
+    // segment can leave only `insufficient_balance` and lose the HTTP status.
+    // Publish a fixed cause, not arbitrary provider JSON or credential values.
+    let lower = line.to_lowercase();
+    if lower.contains("insufficient account balance") || lower.contains("insufficient_balance") {
+        return Some("HTTP 402: Insufficient account balance".to_owned());
+    }
+    if lower.contains("payment required") {
+        return Some("HTTP 402: Payment required".to_owned());
+    }
     let tail = message_tail(line);
     let truncated: String = if tail.chars().count() > MAX_MESSAGE_CHARS {
         let mut buf: String = tail.chars().take(MAX_MESSAGE_CHARS - 1).collect();
@@ -138,8 +148,16 @@ mod tests {
     fn extracts_balance_error_without_a_billing_keyword() {
         let message = extract_error_message("ERROR HTTP 402: Insufficient account balance")
             .expect("balance errors must not become benign empty turns");
-        assert_eq!(message, "Insufficient account balance");
+        assert_eq!(message, "HTTP 402: Insufficient account balance");
         assert!(extract_error_message("ordinary tool output").is_none());
+    }
+
+    #[test]
+    fn balance_json_keeps_status_without_copying_unrelated_secrets() {
+        let input = r#"ERROR provider: HTTP 402: {'message': 'Insufficient account balance', 'api_key': 'must-not-leak', 'type': 'insufficient_balance'}"#;
+        let message = extract_error_message(input).unwrap();
+        assert_eq!(message, "HTTP 402: Insufficient account balance");
+        assert!(!message.contains("must-not-leak"));
     }
 
     #[test]
