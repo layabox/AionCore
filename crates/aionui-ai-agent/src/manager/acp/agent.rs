@@ -139,6 +139,7 @@ const ACP_KILL_GRACE_MS: u64 = 500;
 const OBSERVED_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct AcpStartupConnection {
+    native_feedback: super::native_feedback::NativeFeedback,
     process: Arc<CliAgentProcess>,
     protocol: AcpProtocol,
     permission_rx: mpsc::Receiver<PermissionRequest>,
@@ -264,8 +265,10 @@ async fn spawn_and_connect_acp_once(
     params: &AcpSessionParams,
     runtime: &AgentRuntime,
 ) -> Result<AcpStartupConnection, AcpStartupConnectError> {
+    let (command, native_feedback) =
+        super::native_feedback::NativeFeedback::prepare(params).map_err(AcpStartupConnectError::Agent)?;
     let process = Arc::new(
-        CliAgentProcess::spawn_for_sdk(params.command_spec.clone())
+        CliAgentProcess::spawn_for_sdk(command)
             .await
             .map_err(AcpStartupConnectError::Agent)?,
     );
@@ -364,6 +367,7 @@ async fn spawn_and_connect_acp_once(
     };
 
     Ok(AcpStartupConnection {
+        native_feedback,
         process,
         protocol,
         permission_rx,
@@ -595,6 +599,7 @@ pub enum RequiredFullAutoApplication {
 }
 
 pub struct AcpAgentManager {
+    pub(super) native_feedback: super::native_feedback::NativeFeedback,
     pub(super) goal_running: std::sync::atomic::AtomicBool,
     pub(super) goal_cache: std::sync::Mutex<aionui_session::GoalCache>,
     pub(super) goal_operation_lock: Mutex<()>,
@@ -689,6 +694,7 @@ impl AcpAgentManager {
 
         let startup = spawn_and_connect_acp(&params, &runtime).await?;
         let AcpStartupConnection {
+            native_feedback,
             process,
             protocol,
             permission_rx,
@@ -755,6 +761,7 @@ impl AcpAgentManager {
         let pipeline = PromptPipeline::new(vec![Arc::new(SessionNewPreludeHook)]);
 
         let manager = Self {
+            native_feedback,
             goal_running: std::sync::atomic::AtomicBool::new(false),
             goal_cache: std::sync::Mutex::new(aionui_session::GoalCache::default()),
             goal_operation_lock: Mutex::new(()),

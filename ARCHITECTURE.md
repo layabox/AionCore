@@ -881,3 +881,33 @@ would incorrectly fold a later retry card into an older persisted round.
 The UUID is an internal identity, not a new protocol field or a diagnostic value.
 The packaged regression restarts ACPCore against the same isolated conversation
 and database, then asserts that the old and new Claude retry keys stay distinct.
+
+
+### Native retry feedback at the ACP boundary
+
+OpenCode's native retry status is read only from the loopback listener allocated
+for that owned ACP child and the exact ACP session ID. Verified: OpenCode v1.3.13
+`packages/opencode/src/cli/cmd/acp.ts`, `cli/network.ts`, `session/status.ts`, and
+the real quota-retry capture `opencode-current-retry-diagnosis.json`. Explicit
+operator network arguments retain generic feedback. Requests are bounded, bypass
+proxies, refuse redirects and stop with the prompt future. Only known safe error
+categories, retry attempts and the native deadline enter existing Tips events;
+raw provider payloads are neither persisted nor logged. Lifecycle/transition logs
+identify enabled feedback and retry transitions without payloads.
+
+The pinned Pi adapter already forwards retry attempts/delays but omits the native
+reason. A process-scoped Pi extension classifies failed assistant requests and
+uses the adapter's existing `extension_ui_request/notify` conversion. Verified:
+`jhillyerd/pi-acp@a393c743` `src/acp/agent.ts` and `src/acp/session.ts`, and Pi
+v1.5.1 `core/extensions/types.ts`. The launch wrapper preserves the chosen native
+Pi executable and arguments; no global Pi configuration or upstream package is
+modified. Temporary extension files are released with the manager.
+
+The focused runtime workflow validates changed ACP paths, conversation recency
+and migration immutability on Linux. macOS ARM64 and Windows x64 release builds
+run in parallel and retain packaged MCP, channel, model-catalog and startup smoke
+checks, architecture/import/version checks and provenance. Workspace compilation
+outputs are cached. This tier does not run the full-workspace test suite; the
+full CI workflow remains available for broad changes. Native ARM execution avoids
+the previous extra Intel macOS build (verified: actions/runner-images README,
+macos-15 is ARM64).

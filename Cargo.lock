@@ -369,6 +369,7 @@ dependencies = [
  "libc",
  "mime_guess",
  "regex",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
@@ -396,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "aionui-app"
-version = "0.2.2+layabox.10"
+version = "0.2.2+layabox.11"
 dependencies = [
  "aion-config",
  "aionui-ai-agent",
