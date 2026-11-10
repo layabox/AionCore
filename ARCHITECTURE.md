@@ -885,15 +885,18 @@ and database, then asserts that the old and new Claude retry keys stay distinct.
 
 ### Native retry feedback at the ACP boundary
 
-OpenCode's native retry status is read only from the loopback listener allocated
-for that owned ACP child and the exact ACP session ID. Verified: OpenCode v1.3.13
-`packages/opencode/src/cli/cmd/acp.ts`, `cli/network.ts`, `session/status.ts`, and
-the real quota-retry capture `opencode-current-retry-diagnosis.json`. Explicit
-operator network arguments retain generic feedback. Requests are bounded, bypass
-proxies, refuse redirects and stop with the prompt future. Only known safe error
-categories, retry attempts and the native deadline enter existing Tips events;
-raw provider payloads are neither persisted nor logged. Lifecycle/transition logs
-identify enabled feedback and retry transitions without payloads.
+OpenCode launch arguments are preserved verbatim in the compatibility hotfix.
+The Windows capture in `docs/protocol-schemas/opencode-startup-compatibility.json`
+shows an installed CLI rejecting the injected `--hostname`, `--port`, and `--mdns`
+options before ACP initialize; the same argv succeeds on the separately sampled
+OpenCode 1.3.13. A backend name is not proof of executable flag support. Automatic
+network options and native status polling are therefore disabled; generic ACP
+wait/error feedback remains active. Explicit operator arguments are unchanged.
+The optional status decoder is retained for a future capability-verified path;
+no status endpoint is currently allocated or queried for OpenCode. An info-level
+lifecycle message records this fallback without command contents or credentials.
+Packaged smoke replays the captured argument rejection, an accepting CLI, and
+explicit user options, requiring initialization and a completed visible ACP reply.
 
 The pinned Pi adapter already forwards retry attempts/delays but omits the native
 reason. A process-scoped Pi extension classifies failed assistant requests and

@@ -1,14 +1,13 @@
-//! Native feedback missing from ACP. Verified: OpenCode v1.3.13
-//! cli/cmd/acp.ts, cli/network.ts and session/status.ts; pi-acp a393c743
-//! src/acp/agent.ts and Pi v1.5.1 core/extensions/types.ts.
+//! Native feedback missing from ACP. OpenCode keeps its original launch argv
+//! and generic wait feedback until executable support can be verified.
+//! Verified Pi sources: pi-acp a393c743 src/acp/agent.ts and Pi v1.5.1
+//! core/extensions/types.ts.
 use crate::error::AgentError;
 use crate::factory::acp_assembler::AcpSessionParams;
 use crate::protocol::events::{TipType, TipsEventData};
 use aionui_common::{CommandSpec, EnvVar};
 use serde_json::{Value, json};
-use std::net::{Ipv4Addr, TcpListener};
 use std::path::PathBuf;
-use std::time::Duration;
 
 #[derive(Default)]
 pub(super) struct NativeFeedback {
@@ -43,47 +42,14 @@ impl NativeFeedback {
         let mut feedback = Self::default();
         match params.metadata.backend.as_deref() {
             Some("opencode") => {
-                // Never query a shared/default port. Explicit operator network flags
-                // are preserved; unsupported/custom launches keep generic feedback.
-                if command.args.iter().any(|arg| {
-                    ["--port", "--hostname", "--mdns"]
-                        .iter()
-                        .any(|flag| arg == flag || arg.starts_with(&format!("{flag}=")))
-                }) {
-                    tracing::warn!(conversation_id = %params.conversation_id, "Native OpenCode feedback unavailable with explicit network arguments");
-                    return Ok((command, feedback));
-                }
-                let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-                    .map_err(|_| AgentError::internal("Cannot allocate the OpenCode feedback listener"))?;
-                let port = listener
-                    .local_addr()
-                    .map_err(|_| AgentError::internal("Cannot inspect the OpenCode feedback listener"))?
-                    .port();
-                command.args.extend([
-                    "--hostname".into(),
-                    "127.0.0.1".into(),
-                    "--port".into(),
-                    port.to_string(),
-                    "--mdns".into(),
-                    "false".into(),
-                ]);
-                let client = reqwest::Client::builder()
-                    .no_proxy()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .connect_timeout(Duration::from_millis(400))
-                    .timeout(Duration::from_millis(900))
-                    .build()
-                    .map_err(|_| AgentError::internal("Cannot initialize native Agent feedback"))?;
-                feedback.opencode = Some(OpenCodeStatus {
-                    client,
-                    url: format!("http://127.0.0.1:{port}/session/status"),
-                    directory: params.workspace.path.clone(),
-                    username: command_env(&command, "OPENCODE_SERVER_USERNAME").unwrap_or_else(|| "opencode".into()),
-                    password: command_env(&command, "OPENCODE_SERVER_PASSWORD"),
-                });
-                // Bun binds this exact port; failure uses the normal startup error
-                // path rather than querying a different server.
-                drop(listener);
+                // verified: docs/protocol-schemas/opencode-startup-compatibility.json.
+                // The captured CLI rejects --hostname/--port/--mdns before ACP
+                // initialize. Optional status feedback must not change whether
+                // normal chat can start, even when another CLI accepts the flags.
+                tracing::info!(
+                    conversation_id = %params.conversation_id,
+                    "OpenCode native status feedback disabled; preserving configured launch arguments"
+                );
             }
             Some("pi")
                 if command.args.iter().any(|arg| {

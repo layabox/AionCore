@@ -1,0 +1,19 @@
+{
+  "source": "Developer-supplied Windows ACPCore log, 2026-11-11.aioncore.log",
+  "capturedAt": "2026-11-10T17:28:41.737674Z",
+  "conversationId": "711cb8a1",
+  "runtimeVersion": "0.2.2+layabox.11",
+  "executable": "opencode.cmd",
+  "cliVersion": null,
+  "stderrLines": [
+    "ERRORS",
+    "Unrecognized flag: --hostname in command opencode acp",
+    "Unrecognized flag: --port in command opencode acp",
+    "Unrecognized flag: --mdns in command opencode acp"
+  ],
+  "initializeError": "Incoming transport closed",
+  "httpStatus": 502,
+  "publicCode": "BAD_GATEWAY",
+  "scope": "Captured CLI argument rejection only. The exact installed CLI version is not established. Synthetic regression frames test integration handling, not live provider compatibility.",
+  "privacy": "Local user and project paths, runtime credentials and conversation contents omitted."
+}
