@@ -82,7 +82,7 @@ jobs:
           ./target/${{ matrix.target }}/release/${{ matrix.binary }} --version
       - name: Verify packaged Agent MCP negotiation and wait feedback
         if: runner.os == 'macOS'
-        run: python3 scripts/smoke-acp-mcp-feedback.py target/x86_64-apple-darwin/release/aioncore
+        run: python3 scripts/smoke-acp-mcp-feedback.py target/x86_64-apple-darwin/release/aioncore --report release-artifact/ACP_MCP_FEEDBACK_PROVENANCE.json
       - name: Verify pinned Pi adapter with native stdio and HTTP MCP
         run: node scripts/smoke-pi-mcp.cjs ${{ runner.os == 'macOS' && 'target/x86_64-apple-darwin/release/aioncore' || 'target/x86_64-pc-windows-msvc/release/aioncore.exe' }} release-artifact/PI_MCP_PROVENANCE.json
       - name: Verify macOS runtime linkage

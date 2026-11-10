@@ -15,7 +15,8 @@ args = parser.parse_args()
 BINARY = args.binary.resolve()
 REPORT = args.report
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-report = {'runtime_version': '0.2.2+layabox.9', 'source_commit': '57566db2bfb29331a022d2e78cc8e06e3144d4d2',
+report = {'runtime_version': subprocess.check_output([str(BINARY), '--version'], text=True).strip(),
+          'source_commit': os.environ.get('GITHUB_SHA', 'unrecorded-local-sample'),
           'scope': 'packaged runtime preflight + synthetic ACP protocol fixtures; no real provider prompts',
           'catalog': [], 'fixtures': []}
 NATIVE_ONLY=False

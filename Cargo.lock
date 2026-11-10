@@ -396,7 +396,7 @@ dependencies = [
 
 [[package]]
 name = "aionui-app"
-version = "0.2.2+layabox.9"
+version = "0.2.2+layabox.10"
 dependencies = [
  "aion-config",
  "aionui-ai-agent",
