@@ -196,6 +196,21 @@ with tempfile.TemporaryDirectory(prefix='laya-agent-audit-') as tmp:
     entry['messages']=request('GET',f'/api/conversations/{cid}/messages')
     capture_file=root/(scenario+'.py.ndjson')
     entry['wire']=[json.loads(x) for x in capture_file.read_text().splitlines()] if capture_file.exists() else []
+    if scenario=='claude-retry':
+     initial_keys={m.get('content',{}).get('supersedes_key') for m in entry['messages']['items']
+       if m.get('content',{}).get('code')=='CLAUDE_RETRYING'}
+     assert len(initial_keys)==1 and None not in initial_keys, 'Claude retry must carry a replacement identity'
+     # Rebuild the entire runtime against the same isolated database and
+     # conversation. Generation counters restart; persisted card identity must not.
+     stop();start()
+     request('POST',f'/api/conversations/{cid}/runtime/ensure')
+     request('POST',f'/api/conversations/{cid}/messages',{'content':'synthetic native reconnect status probe'})
+     time.sleep(1.3)
+     recovered_messages=request('GET',f'/api/conversations/{cid}/messages')
+     recovered_keys={m.get('content',{}).get('supersedes_key') for m in recovered_messages['items']
+       if m.get('content',{}).get('code')=='CLAUDE_RETRYING'}
+     assert len(recovered_keys)==2 and None not in recovered_keys, 'Runtime restart must not reuse a persisted Claude retry key'
+     entry['retry_keys_after_runtime_restart']=sorted(recovered_keys)
    except Exception as e:entry['error']=str(e)
    finally:
     try:request('DELETE',f'/api/conversations/{cid}')

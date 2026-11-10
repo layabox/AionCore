@@ -868,3 +868,10 @@ not acquire Pi's command/variable evaluation. Packaged Pi smoke asserts the exac
 received values, MCP initialize/tools/list over both transports, and SSE rejection.
 No model prompt is sent; this is registration/discovery verification, not a claim
 about model-generated tool selection.
+
+Claude retry keys include a fresh reader UUID as well as its turn generation.
+Generations restart when ACPCore rebuilds a connection; generation-only keys
+would incorrectly fold a later retry card into an older persisted round.
+The UUID is an internal identity, not a new protocol field or a diagnostic value.
+The packaged regression restarts ACPCore against the same isolated conversation
+and database, then asserts that the old and new Claude retry keys stay distinct.

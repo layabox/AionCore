@@ -1721,6 +1721,9 @@ async fn reader_task(
     // when it arrives. 0 = no turn opened yet → fall back to read-time (no regression
     // for the first frames). See protocols/design/claude-midturn-input-turn-gen-design.md §4-A.
     let mut turn_open_epoch: u64 = 0;
+    // A new ACPCore session starts its generation counter at zero. Include a
+    // reader identity so persisted retry cards cannot collide after a restart.
+    let notice_scope = uuid::Uuid::new_v4();
     let mut process_batch = |batch: Vec<(Option<serde_json::Value>, Vec<SessionEvent>)>| {
         let cur_gen = turn_gen.load(Ordering::SeqCst);
         for (raw, events) in batch {
@@ -1868,7 +1871,7 @@ async fn reader_task(
                     ..
                 } = &mut ev
                 {
-                    *key = format!("{key}:turn-{cur_gen}");
+                    *key = format!("{key}:connection-{notice_scope}:turn-{cur_gen}");
                 }
                 if let SessionEvent::Permission {
                     request_id, metadata, ..
