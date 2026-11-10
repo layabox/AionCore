@@ -364,6 +364,7 @@ impl Ctx {
 
     async fn insert_row(&self, user_id: &str, id: &str, name: &str, extra: serde_json::Value) -> ConversationRow {
         let row = ConversationRow {
+            last_user_message_at: None,
             id: id.to_owned(),
             user_id: user_id.to_owned(),
             name: name.to_owned(),

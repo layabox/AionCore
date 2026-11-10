@@ -97,6 +97,7 @@ async fn ensure_conversation(services: &aionui_app::AppServices, user_id: &str, 
     }
     let now = aionui_common::now_ms();
     repo.create(&ConversationRow {
+        last_user_message_at: None,
         id: conversation_id.to_owned(),
         user_id: user_id.to_owned(),
         name: title.to_owned(),

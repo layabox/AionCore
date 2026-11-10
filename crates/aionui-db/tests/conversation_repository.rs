@@ -25,6 +25,7 @@ async fn create_user_2(db: &aionui_db::Database) {
 fn make_conversation(suffix: &str) -> ConversationRow {
     let now = aionui_common::now_ms();
     ConversationRow {
+        last_user_message_at: None,
         id: aionui_common::generate_prefixed_id("conv"),
         user_id: USER_ID.to_string(),
         name: format!("Conversation {suffix}"),

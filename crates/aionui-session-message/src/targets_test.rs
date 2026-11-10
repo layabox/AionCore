@@ -72,6 +72,7 @@ impl Default for NewConversation {
 impl TargetsCtx {
     async fn insert(&self, new: NewConversation) {
         let row = ConversationRow {
+            last_user_message_at: None,
             id: new.id.to_owned(),
             user_id: new.user_id.to_owned(),
             name: new.name.to_owned(),
@@ -107,6 +108,7 @@ impl TargetsCtx {
     async fn insert_recent_fillers(&self, count: i64) {
         for index in 0..count {
             let row = ConversationRow {
+                last_user_message_at: None,
                 id: format!("c_filler_{index}"),
                 user_id: "user_1".to_owned(),
                 name: format!("filler {index}"),
@@ -728,6 +730,7 @@ async fn a_page_stays_full_when_hard_filtered_rows_fill_the_scan_window() {
     let ctx = setup_targets_ctx().await;
     for index in 0..12 {
         let row = ConversationRow {
+            last_user_message_at: None,
             id: format!("c_team_{index}"),
             user_id: "user_1".to_owned(),
             name: format!("team {index}"),

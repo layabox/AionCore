@@ -1224,6 +1224,7 @@ mod tests {
     fn agent_title_test_row(name: &str, name_source: Option<&str>) -> aionui_db::models::ConversationRow {
         let now = aionui_common::now_ms();
         aionui_db::models::ConversationRow {
+            last_user_message_at: None,
             id: "conv-1".into(),
             user_id: "user-1".into(),
             name: name.into(),

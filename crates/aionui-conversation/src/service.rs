@@ -1424,6 +1424,7 @@ impl ConversationService {
         }
 
         let row = aionui_db::models::ConversationRow {
+            last_user_message_at: None,
             id: id.clone(),
             user_id: user_id.to_owned(),
             name: req.name.unwrap_or_default(),
@@ -2861,6 +2862,7 @@ impl ConversationService {
             parent.name_source.clone()
         };
         let row = aionui_db::models::ConversationRow {
+            last_user_message_at: None,
             id: new_id.clone(),
             user_id: user_id.to_owned(),
             name: explicit_name.unwrap_or_else(|| parent.name.clone()),
@@ -6185,6 +6187,7 @@ mod tests {
 
     fn response_with_type(agent_type: aionui_common::AgentType) -> ConversationResponse {
         ConversationResponse {
+            last_user_message_at: None,
             id: "conv-1".into(),
             name: "test".into(),
             name_source: None,

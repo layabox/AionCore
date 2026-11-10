@@ -22,6 +22,7 @@ async fn run_acp_tool_call_update_without_insert_creates_placeholder() {
     let user_id = user.id.clone();
     let repo = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
     repo.create(&ConversationRow {
+        last_user_message_at: None,
         id: "conv-1".into(),
         user_id: user_id.clone(),
         name: "test".into(),
@@ -101,6 +102,7 @@ async fn run_acp_tool_call_late_initial_event_merges_with_update_placeholder() {
     let user_id = user.id.clone();
     let repo = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
     repo.create(&ConversationRow {
+        last_user_message_at: None,
         id: "conv-1".into(),
         user_id: user_id.clone(),
         name: "test".into(),

@@ -32,6 +32,9 @@ pub struct ConversationRow {
     pub pinned_at: Option<TimestampMs>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
+    /// Last persisted user-send time, in milliseconds; NULL for an empty history.
+    #[serde(default)]
+    pub last_user_message_at: Option<TimestampMs>,
     /// Project binding (project-bind side branch); NULL until bound/backfilled.
     pub project_id: Option<String>,
     /// Workspace folder binding; NULL until bound/backfilled.

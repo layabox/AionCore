@@ -203,6 +203,7 @@ mod tests {
 
     fn make_conversation(id: &str) -> ConversationRow {
         ConversationRow {
+            last_user_message_at: None,
             id: id.into(),
             user_id: "system_default_user".into(),
             name: "Cron Conversation".into(),

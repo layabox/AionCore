@@ -90,6 +90,7 @@ pub fn row_to_response_with_extra(
         prompt_capability: None,
         created_at: row.created_at,
         modified_at: row.updated_at,
+        last_user_message_at: row.last_user_message_at,
         extra,
     })
 }
@@ -294,6 +295,7 @@ fn extract_preview_text(raw_content: &str) -> String {
 /// Convert a search result row into an API search item DTO.
 pub fn search_row_to_item(row: MessageSearchRow, data_dir: &Path) -> Result<MessageSearchItem, ConversationError> {
     let conversation_row = ConversationRow {
+        last_user_message_at: row.conversation_last_user_message_at,
         id: row.conversation_id,
         user_id: String::new(),
         name: row.conversation_name,
@@ -338,6 +340,7 @@ mod tests {
         extra_json: &str,
     ) -> ConversationRow {
         ConversationRow {
+            last_user_message_at: None,
             id: "conv_1".into(),
             user_id: "user_1".into(),
             name: "Test".into(),
@@ -402,6 +405,16 @@ mod tests {
     }
 
     #[test]
+    fn row_to_response_preserves_user_recency_without_history_reads() {
+        let mut row = make_row("acp", "pending", None, None, "{}");
+        row.last_user_message_at = Some(1_700_000_000_123);
+        row.updated_at = 1_800_000_000_000;
+        let resp = row_to_response(row, Path::new("/tmp/data")).unwrap();
+        assert_eq!(resp.last_user_message_at, Some(1_700_000_000_123));
+        assert_eq!(resp.modified_at, 1_800_000_000_000);
+    }
+
+    #[test]
     fn row_to_response_invalid_type() {
         let row = make_row("invalid", "pending", None, None, "{}");
         let err = row_to_response(row, Path::new("/tmp/data")).unwrap_err();
@@ -411,6 +424,7 @@ mod tests {
     #[test]
     fn row_to_response_invalid_extra_json() {
         let row = ConversationRow {
+            last_user_message_at: None,
             id: "conv_1".into(),
             user_id: "user_1".into(),
             name: "Test".into(),
@@ -545,6 +559,7 @@ mod tests {
     #[test]
     fn row_with_pinned_at() {
         let row = ConversationRow {
+            last_user_message_at: None,
             id: "conv_2".into(),
             user_id: "user_1".into(),
             name: "Pinned".into(),
@@ -634,6 +649,7 @@ mod tests {
             conversation_pinned_at: None,
             conversation_created_at: 1000,
             conversation_updated_at: 2000,
+            conversation_last_user_message_at: None,
         };
 
         let item = search_row_to_item(row, Path::new("/tmp/data")).unwrap();
@@ -670,6 +686,7 @@ mod tests {
             conversation_pinned_at: None,
             conversation_created_at: 1000,
             conversation_updated_at: 2000,
+            conversation_last_user_message_at: None,
         };
 
         let err = search_row_to_item(row, Path::new("/tmp/data")).unwrap_err();
@@ -695,6 +712,7 @@ mod tests {
             conversation_pinned_at: None,
             conversation_created_at: 1000,
             conversation_updated_at: 2000,
+            conversation_last_user_message_at: None,
         };
 
         let err = search_row_to_item(row, Path::new("/tmp/data")).unwrap_err();

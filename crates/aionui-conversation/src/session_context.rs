@@ -824,6 +824,7 @@ mod tests {
 
     fn row(agent_type: &str, extra: serde_json::Value, model: Option<serde_json::Value>) -> ConversationRow {
         ConversationRow {
+            last_user_message_at: None,
             id: "conv-1".into(),
             user_id: "user-1".into(),
             name: "test".into(),

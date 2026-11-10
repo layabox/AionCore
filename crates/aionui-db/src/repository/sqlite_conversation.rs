@@ -1285,7 +1285,8 @@ impl IConversationRepository for SqliteConversationRepository {
                 c.pinned AS conversation_pinned, \
                 c.pinned_at AS conversation_pinned_at, \
                 c.created_at AS conversation_created_at, \
-                c.updated_at AS conversation_updated_at \
+                c.updated_at AS conversation_updated_at, \
+                c.last_user_message_at AS conversation_last_user_message_at \
              FROM messages m \
              INNER JOIN conversations c ON m.conversation_id = c.id \
              WHERE c.user_id = ? AND m.content LIKE ? AND m.type != 'acp_goal' \
@@ -1619,6 +1620,7 @@ mod tests {
     fn sample_conversation(user_id: &str) -> ConversationRow {
         let now = aionui_common::now_ms();
         ConversationRow {
+            last_user_message_at: None,
             id: aionui_common::generate_prefixed_id("conv"),
             user_id: user_id.to_string(),
             name: "Test Conversation".to_string(),

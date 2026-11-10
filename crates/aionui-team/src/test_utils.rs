@@ -982,6 +982,7 @@ pub(crate) mod workspace_harness {
             }
             self.repo
                 .create(&ConversationRow {
+                    last_user_message_at: None,
                     id: id.clone(),
                     user_id: request.user_id,
                     name: request.name,

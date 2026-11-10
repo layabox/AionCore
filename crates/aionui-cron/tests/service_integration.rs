@@ -68,6 +68,7 @@ async fn seed_sqlite_conversations(db: &aionui_db::Database, conversation_ids: &
     let repo = SqliteConversationRepository::new(db.pool().clone());
     for conversation_id in conversation_ids {
         repo.create(&aionui_db::models::ConversationRow {
+            last_user_message_at: None,
             id: (*conversation_id).to_owned(),
             user_id: "u1".to_owned(),
             name: (*conversation_id).to_owned(),
@@ -212,6 +213,7 @@ impl StubConvRepo {
         let row = rows
             .entry(conversation_id.to_owned())
             .or_insert_with(|| aionui_db::models::ConversationRow {
+                last_user_message_at: None,
                 id: conversation_id.to_owned(),
                 user_id: "u1".into(),
                 name: "stub".into(),
@@ -253,6 +255,7 @@ impl IConversationRepository for StubConvRepo {
 
         let row = if id == "conv_mode" {
             aionui_db::models::ConversationRow {
+                last_user_message_at: None,
                 id: id.into(),
                 user_id: "u1".into(),
                 name: "Gemini Chat".into(),
@@ -286,6 +289,7 @@ impl IConversationRepository for StubConvRepo {
             }
         } else if id == "conv_mode_hermes" {
             aionui_db::models::ConversationRow {
+                last_user_message_at: None,
                 id: id.into(),
                 user_id: "u1".into(),
                 name: "Hermes Chat".into(),
@@ -319,6 +323,7 @@ impl IConversationRepository for StubConvRepo {
             }
         } else if id == "conv_mode_default" {
             aionui_db::models::ConversationRow {
+                last_user_message_at: None,
                 id: id.into(),
                 user_id: "u1".into(),
                 name: "Gemini Default Chat".into(),
@@ -352,6 +357,7 @@ impl IConversationRepository for StubConvRepo {
             }
         } else if id == "conv_mode_codex" {
             aionui_db::models::ConversationRow {
+                last_user_message_at: None,
                 id: id.into(),
                 user_id: "u1".into(),
                 name: "Codex Chat".into(),
@@ -385,6 +391,7 @@ impl IConversationRepository for StubConvRepo {
             }
         } else if id == "conv_mode_claude" {
             aionui_db::models::ConversationRow {
+                last_user_message_at: None,
                 id: id.into(),
                 user_id: "u1".into(),
                 name: "Claude Chat".into(),
@@ -418,6 +425,7 @@ impl IConversationRepository for StubConvRepo {
             }
         } else if id == "conv_mode_stale_backend" {
             aionui_db::models::ConversationRow {
+                last_user_message_at: None,
                 id: id.into(),
                 user_id: "u1".into(),
                 name: "Gemini Stale Backend Chat".into(),
@@ -451,6 +459,7 @@ impl IConversationRepository for StubConvRepo {
             }
         } else if id == "conv_mode_aionrs" {
             aionui_db::models::ConversationRow {
+                last_user_message_at: None,
                 id: id.into(),
                 user_id: "u1".into(),
                 name: "Aionrs Chat".into(),
@@ -484,6 +493,7 @@ impl IConversationRepository for StubConvRepo {
             }
         } else if id == "conv_mode_assistant_stale_backend" {
             aionui_db::models::ConversationRow {
+                last_user_message_at: None,
                 id: id.into(),
                 user_id: "u1".into(),
                 name: "Assistant Stale Backend Chat".into(),
@@ -510,6 +520,7 @@ impl IConversationRepository for StubConvRepo {
             }
         } else if id == "conv_mode_missing_assistant_stale_backend" {
             aionui_db::models::ConversationRow {
+                last_user_message_at: None,
                 id: id.into(),
                 user_id: "u1".into(),
                 name: "Missing Assistant Stale Backend Chat".into(),
@@ -535,6 +546,7 @@ impl IConversationRepository for StubConvRepo {
             }
         } else if id == "conv_mode_assistant_snapshot" {
             aionui_db::models::ConversationRow {
+                last_user_message_at: None,
                 id: id.into(),
                 user_id: "u1".into(),
                 name: "Snapshot Assistant Chat".into(),
@@ -559,6 +571,7 @@ impl IConversationRepository for StubConvRepo {
             }
         } else {
             aionui_db::models::ConversationRow {
+                last_user_message_at: None,
                 id: id.into(),
                 user_id: "u1".into(),
                 name: "stub".into(),
@@ -656,6 +669,7 @@ impl IConversationRepository for StubConvRepo {
         let row = rows
             .entry(id.to_owned())
             .or_insert_with(|| aionui_db::models::ConversationRow {
+                last_user_message_at: None,
                 id: id.to_owned(),
                 user_id: "u1".into(),
                 name: "stub".into(),
@@ -2571,6 +2585,7 @@ async fn oc2b_rejects_existing_jobs_with_cross_user_conversation_code() {
     .unwrap();
     conv_repo
         .create(&aionui_db::models::ConversationRow {
+            last_user_message_at: None,
             id: "conv_user_b".to_owned(),
             user_id: "u2".to_owned(),
             name: "User B Conversation".to_owned(),

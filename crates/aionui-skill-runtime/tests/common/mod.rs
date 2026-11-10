@@ -141,6 +141,7 @@ impl TestHarness {
         let id = format!("conv_{user_id}_{n}");
         let extra = serde_json::json!({ "skills": skills, "backend": "claude" });
         let row = ConversationRow {
+            last_user_message_at: None,
             id: id.clone(),
             user_id: user_id.to_owned(),
             name: "test".to_owned(),

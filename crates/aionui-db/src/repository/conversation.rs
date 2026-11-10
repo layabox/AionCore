@@ -495,4 +495,5 @@ pub struct MessageSearchRow {
     pub conversation_pinned_at: Option<TimestampMs>,
     pub conversation_created_at: TimestampMs,
     pub conversation_updated_at: TimestampMs,
+    pub conversation_last_user_message_at: Option<TimestampMs>,
 }

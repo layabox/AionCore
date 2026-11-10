@@ -4839,6 +4839,7 @@ mod tests {
         .unwrap();
         conv_repo
             .create(&aionui_db::models::ConversationRow {
+                last_user_message_at: None,
                 id: accepting_conversation_id.to_owned(),
                 user_id: "user-test".to_owned(),
                 name: "Codex CLI".to_owned(),
@@ -4864,6 +4865,7 @@ mod tests {
             .unwrap();
         conv_repo
             .create(&aionui_db::models::ConversationRow {
+                last_user_message_at: None,
                 id: rejecting_conversation_id.to_owned(),
                 user_id: "user-test".to_owned(),
                 name: "Claude Code".to_owned(),

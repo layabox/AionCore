@@ -306,10 +306,12 @@ pub struct SearchMessagesQuery {
 /// `extra.current_model_id` / `extra.current_mode_id`). See
 /// `docs/superpowers/specs/2026-05-12-conversation-type-aware-model-design.md`.
 ///
-/// `Option<T>` fields use `skip_serializing_if = "Option::is_none"` so the
+/// Most `Option<T>` fields use `skip_serializing_if = "Option::is_none"` so the
 /// serialized JSON omits the key entirely when the value is absent. This
 /// keeps the wire shape tight and matches what the frontend mapper already
-/// tolerates (`'model' in r` guard handles missing keys).
+/// tolerates (`'model' in r` guard handles missing keys). User recency is the
+/// exception: an explicit null distinguishes an empty history from an older
+/// server that does not provide the summary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationResponse {
     pub id: String,
@@ -346,6 +348,10 @@ pub struct ConversationResponse {
     pub prompt_capability: Option<PromptCapabilityView>,
     pub created_at: TimestampMs,
     pub modified_at: TimestampMs,
+    /// Last persisted user-send time in milliseconds. Explicit null means no
+    /// user message; clients distinguish it from older servers lacking the key.
+    #[serde(default)]
+    pub last_user_message_at: Option<TimestampMs>,
     pub extra: serde_json::Value,
 }
 
@@ -738,6 +744,7 @@ mod tests {
     #[test]
     fn serialize_conversation_response_snake_case() {
         let resp = ConversationResponse {
+            last_user_message_at: Some(1712345678000),
             id: "conv_1".into(),
             name: "Test".into(),
             name_source: None,
@@ -768,6 +775,7 @@ mod tests {
         assert_eq!(json["source"], "aionui");
         assert_eq!(json["created_at"], 1712345678000_i64);
         assert_eq!(json["modified_at"], 1712345678000_i64);
+        assert_eq!(json["last_user_message_at"], 1712345678000_i64);
         assert_eq!(json["extra"]["workspace"], "/project");
         // Verify snake_case keys
         assert!(json.get("channelChatId").is_none());
@@ -784,6 +792,7 @@ mod tests {
     #[test]
     fn serialize_conversation_response_omits_none_keys() {
         let resp = ConversationResponse {
+            last_user_message_at: None,
             id: "conv_none".into(),
             name: "Test".into(),
             name_source: None,
@@ -815,11 +824,13 @@ mod tests {
         assert_eq!(json["id"], "conv_none");
         assert_eq!(json["type"], "acp");
         assert_eq!(json["pinned"], false);
+        assert_eq!(json.get("last_user_message_at"), Some(&serde_json::Value::Null));
     }
 
     #[test]
     fn conversation_response_roundtrip() {
         let resp = ConversationResponse {
+            last_user_message_at: None,
             id: "conv_2".into(),
             name: "Round".into(),
             name_source: None,
@@ -845,6 +856,10 @@ mod tests {
         assert!(deserialized.pinned);
         assert_eq!(deserialized.pinned_at, Some(1712345678000));
         assert_eq!(deserialized.channel_chat_id.as_deref(), Some("group:42"));
+        let mut legacy = serde_json::to_value(&resp).unwrap();
+        legacy.as_object_mut().unwrap().remove("last_user_message_at");
+        let legacy: ConversationResponse = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.last_user_message_at, None);
     }
 
     // ── MessageResponse ─────────────────────────────────────────────
@@ -910,6 +925,7 @@ mod tests {
             message_created_at: 1712345678000,
             preview_text: "matched snippet".into(),
             conversation: ConversationResponse {
+                last_user_message_at: None,
                 id: "conv_1".into(),
                 name: "Code Review".into(),
                 name_source: None,
@@ -951,6 +967,7 @@ mod tests {
             message_created_at: 9000,
             preview_text: "some content preview".into(),
             conversation: ConversationResponse {
+                last_user_message_at: None,
                 id: "conv_x".into(),
                 name: "Search Test".into(),
                 name_source: None,
@@ -1044,6 +1061,7 @@ mod tests {
     fn conversation_list_response_serialization() {
         let list: ConversationListResponse = PaginatedResult {
             items: vec![ConversationResponse {
+                last_user_message_at: None,
                 id: "conv_1".into(),
                 name: "Test".into(),
                 name_source: None,
@@ -1100,6 +1118,7 @@ mod tests {
                 message_created_at: 5000,
                 preview_text: "matched".into(),
                 conversation: ConversationResponse {
+                    last_user_message_at: None,
                     id: "c1".into(),
                     name: "Conv".into(),
                     name_source: None,

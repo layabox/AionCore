@@ -28,6 +28,7 @@ async fn insert_caller(
     model: Option<&str>,
 ) {
     repo.create(&ConversationRow {
+        last_user_message_at: None,
         id: id.to_owned(),
         user_id: USER.to_owned(),
         name: "caller".to_owned(),

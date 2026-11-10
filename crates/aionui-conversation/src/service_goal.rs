@@ -138,6 +138,7 @@ mod goal_tests {
         let repo: Arc<dyn IConversationRepository> = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
         let user = "system_default_user";
         let row = ConversationRow {
+            last_user_message_at: None,
             id: "goal-test".into(),
             user_id: user.into(),
             name: "Goal test".into(),

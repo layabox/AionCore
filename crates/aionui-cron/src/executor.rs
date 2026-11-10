@@ -2950,6 +2950,7 @@ mod tests {
             id: &str,
         ) -> Result<Option<aionui_db::models::ConversationRow>, aionui_db::DbError> {
             Ok(Some(aionui_db::models::ConversationRow {
+                last_user_message_at: None,
                 id: id.to_owned(),
                 user_id: "user1".into(),
                 name: "Cron Conversation".into(),
@@ -3107,6 +3108,7 @@ mod tests {
         fn new(conversation_id: &str, extra: serde_json::Value) -> Self {
             Self {
                 row: aionui_db::models::ConversationRow {
+                    last_user_message_at: None,
                     id: conversation_id.to_owned(),
                     user_id: "cron".into(),
                     name: "Cron Conversation".into(),

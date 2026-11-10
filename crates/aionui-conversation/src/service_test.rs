@@ -1634,6 +1634,7 @@ async fn insert_conversation_with_type(repo: &Arc<MockRepo>, user_id: &str, agen
     );
     let row = ConversationRow {
         id,
+        last_user_message_at: None,
         user_id: user_id.to_owned(),
         name: format!("legacy {}", agent_type.serde_name()),
         r#type: agent_type.serde_name().to_owned(),
@@ -2481,6 +2482,26 @@ async fn list_returns_created_conversations() {
     let result = svc.list("user_1", ListConversationsQuery::default()).await.unwrap();
     assert_eq!(result.items.len(), 2);
     assert_eq!(result.total, 2);
+}
+
+#[tokio::test]
+async fn list_returns_persisted_user_recency_without_starting_an_agent() {
+    let (svc, _broadcaster, repo, task_mgr) = make_service();
+    let conversation = svc.create("user_1", make_create_req()).await.unwrap();
+    let expected = 1_700_000_000_123;
+    {
+        let mut rows = repo.rows.lock().unwrap();
+        let row = rows.iter_mut().find(|row| row.id == conversation.id).unwrap();
+        row.last_user_message_at = Some(expected);
+        row.updated_at = expected + 9000;
+    }
+    let result = svc.list("user_1", ListConversationsQuery::default()).await.unwrap();
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items[0].last_user_message_at, Some(expected));
+    assert_eq!(result.items[0].modified_at, expected + 9000);
+    assert_eq!(task_mgr.active_count(), 0);
+    let other = svc.list("user_2", ListConversationsQuery::default()).await.unwrap();
+    assert!(other.items.is_empty());
 }
 
 #[tokio::test]
@@ -9037,6 +9058,7 @@ async fn get_backfills_legacy_row_and_persists() {
     // Seed a legacy row directly via the repo — simulates a pre-migration
     // conversation that the service has never touched.
     let legacy_row = ConversationRow {
+        last_user_message_at: None,
         id: "legacy-1".into(),
         user_id: "user-1".into(),
         name: "legacy".into(),
@@ -9090,6 +9112,7 @@ async fn list_backfills_mixed_rows() {
 
     // Row 1: legacy (needs backfill).
     let legacy = ConversationRow {
+        last_user_message_at: None,
         id: "a".into(),
         user_id: "u".into(),
         name: "a".into(),
@@ -9113,6 +9136,7 @@ async fn list_backfills_mixed_rows() {
     };
     // Row 2: already migrated.
     let modern = ConversationRow {
+        last_user_message_at: None,
         id: "b".into(),
         user_id: "u".into(),
         name: "b".into(),
@@ -9234,6 +9258,7 @@ async fn seed_aionrs_conversation_with_snapshot(
     resolved_permission_value: Option<&str>,
 ) -> ConversationRow {
     let row = ConversationRow {
+        last_user_message_at: None,
         id: format!("aionrs-seed-{}", aionui_common::generate_short_id()),
         user_id: "user_1".into(),
         name: "aionrs seed".into(),
@@ -9635,6 +9660,7 @@ mod session_mentions_integration {
     /// and `extra` (team marker) exactly.
     async fn insert_conv(repo: &Arc<MockRepo>, user_id: &str, id: &str, name: &str, extra: serde_json::Value) {
         let row = ConversationRow {
+            last_user_message_at: None,
             id: id.to_owned(),
             user_id: user_id.to_owned(),
             name: name.to_owned(),

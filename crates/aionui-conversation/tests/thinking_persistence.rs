@@ -102,6 +102,7 @@ async fn empty_thinking_segment_is_dropped_before_persistence() {
     let user = user_repo.create_user("user-1", "hash").await.unwrap();
     let repo = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
     repo.create(&ConversationRow {
+        last_user_message_at: None,
         id: "conv-1".into(),
         user_id: user.id.clone(),
         name: "test".into(),
